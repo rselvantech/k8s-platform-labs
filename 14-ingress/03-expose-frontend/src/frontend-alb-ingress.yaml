@@ -1,0 +1,35 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: frontend-alb
+  namespace: otel-demo
+  annotations:
+    # Scheme: internet-facing (public) vs internal (private)
+    alb.ingress.kubernetes.io/scheme: internet-facing
+    
+    # Target type: ip (pod IPs) vs instance (EC2 node IPs)
+    # ip mode is recommended for better pod-level routing
+    alb.ingress.kubernetes.io/target-type: ip
+    
+    # Health check configuration
+    alb.ingress.kubernetes.io/healthcheck-path: /
+    alb.ingress.kubernetes.io/healthcheck-protocol: HTTP
+    alb.ingress.kubernetes.io/success-codes: "200"
+    
+    # Optional: Specify subnets (auto-discovered if not specified)
+    # alb.ingress.kubernetes.io/subnets: subnet-xxx,subnet-yyy
+    
+    # Optional: Tags for the ALB
+    alb.ingress.kubernetes.io/tags: Environment=demo,Application=otel-demo
+spec:
+  ingressClassName: alb
+  rules:
+    - http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: frontend-proxy
+                port:
+                  number: 8080

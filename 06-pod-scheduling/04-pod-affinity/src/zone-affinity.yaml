@@ -1,0 +1,26 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: zone-affinity-deploy
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: zone-affinity
+  template:
+    metadata:
+      labels:
+        app: zone-affinity
+    spec:
+      terminationGracePeriodSeconds: 0
+      affinity:
+        podAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels:
+                  app: zone-ref
+              topologyKey: topology.kubernetes.io/zone  # same ZONE as reference
+      containers:
+        - name: app
+          image: busybox
+          command: ["sh", "-c", "sleep 3600"]

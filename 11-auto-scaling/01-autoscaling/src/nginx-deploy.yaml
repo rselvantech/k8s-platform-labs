@@ -1,0 +1,38 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nginx-deploy
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: nginx
+  template:
+    metadata:
+      labels:
+        app: nginx
+    spec:
+      terminationGracePeriodSeconds: 0
+      containers:
+        - name: nginx
+          image: nginx
+          ports:
+            - containerPort: 80
+          resources:
+            requests:
+              cpu: "100m"       # HPA calculates utilisation against this
+              memory: "128Mi"
+            limits:
+              cpu: "200m"
+              memory: "256Mi"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: nginx-svc
+spec:
+  selector:
+    app: nginx
+  ports:
+    - port: 80
+      targetPort: 80

@@ -1,0 +1,16 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pull-policy-demo
+spec:
+  restartPolicy: Never
+  containers:
+    - name: dev-container
+      image: busybox:latest        # Development: always pull latest
+      imagePullPolicy: Always    # Explicitly set — matches default for :latest
+      command: ["sh", "-c", "echo 'Dev container started'; sleep 5"]
+
+    - name: prod-container
+      image: busybox:1.36          # Production: pinned version
+      imagePullPolicy: IfNotPresent  # Use cached if available — bandwidth efficient
+      command: ["sh", "-c", "echo 'Prod container started'; sleep 5"]

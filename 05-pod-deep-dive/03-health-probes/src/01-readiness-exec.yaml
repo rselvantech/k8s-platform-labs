@@ -1,0 +1,29 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: readiness-exec-demo
+spec:
+  restartPolicy: Never
+  containers:
+    - name: app
+      image: busybox:1.36
+      command:
+        - sh
+        - -c
+        - |
+          echo "[app] Starting at $(date +%T)"
+          touch /tmp/ready
+          echo "[app] Ready file created at $(date +%T)"
+          echo "[app] Running — staying alive for probe demos"
+          sleep 3600
+      readinessProbe:
+        exec:
+          command:
+            - cat
+            - /tmp/ready        # exit 0 if file exists → probe Success
+                                # exit 1 if file missing → probe Failure
+        initialDelaySeconds: 5  # Wait 5s after container starts
+        periodSeconds: 5        # Fire every 5 seconds continuously
+        failureThreshold: 1     # 1 failure → ready=false immediately
+        successThreshold: 1     # 1 success → ready=true
+        timeoutSeconds: 2       # Timeout after 2 seconds

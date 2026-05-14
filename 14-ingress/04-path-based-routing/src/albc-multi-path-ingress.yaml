@@ -1,0 +1,64 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: multi-path-alb
+  namespace: otel-demo
+  annotations:
+    alb.ingress.kubernetes.io/scheme: internet-facing
+    alb.ingress.kubernetes.io/target-type: ip
+    alb.ingress.kubernetes.io/healthcheck-path: /
+    alb.ingress.kubernetes.io/success-codes: "200"
+    
+    # Path rewriting action for Jaeger
+    # Strips /jaeger prefix before forwarding to the service
+    # Required because Jaeger serves on / not /jaeger
+    alb.ingress.kubernetes.io/actions.jaeger-rewrite: |
+      {
+        "Type": "forward",
+        "ForwardConfig": {
+          "TargetGroups": [{
+            "ServiceName": "jaeger",
+            "ServicePort": "16686",
+            "Weight": 100
+          }]
+        }
+      }
+    
+    # Alternative: Use target-group-attributes for advanced settings
+    # alb.ingress.kubernetes.io/target-group-attributes: deregistration_delay.timeout_seconds=30
+spec:
+  ingressClassName: alb
+  rules:
+  - http:
+      paths:
+      # Path 1: Frontend - Default root path
+      # Matches: /, /cart, /checkout, etc.
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: frontend-proxy
+            port:
+              number: 8080
+      
+      # Path 2: Grafana - Already expects /grafana sub-path
+      # No rewriting needed - Grafana configured with root_url=/grafana
+      # Matches: /grafana/, /grafana/dashboard, etc.
+      - path: /grafana
+        pathType: Prefix
+        backend:
+          service:
+            name: grafana
+            port:
+              number: 3000
+      
+      # Path 3: Jaeger - Uses custom action for path rewriting
+      # Action strips /jaeger prefix before forwarding
+      # User requests /jaeger/search → Jaeger receives /search
+      - path: /jaeger
+        pathType: Prefix
+        backend:
+          service:
+            name: jaeger-rewrite  # References the action annotation
+            port:
+              name: use-annotation  # Special value - tells controller to use action

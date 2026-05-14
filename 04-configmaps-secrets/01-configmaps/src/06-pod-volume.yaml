@@ -1,0 +1,52 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pod-volume
+  namespace: default
+spec:
+  volumes:
+  # Volume-1: backed by app-files ConfigMap
+  - name: config-files       # volume name — referenced in volumeMounts below
+    configMap:
+      name: app-files        # the ConfigMap to project
+      # items: selectively project only some keys and control filenames
+      # Without items, ALL keys are projected using their key as the filename
+      items:
+      - key: nginx.conf         # key in the ConfigMap
+        path: nginx/nginx.conf  # path inside the mounted directory (subdirs allowed)
+      - key: app.properties
+        path: app.properties
+        # mode: 0400           # optional: per-file permission (octal)
+  # Volume-2: backed by release-config (immutable ConfigMap — mountable like any other)
+  - name: release-files
+    configMap:
+      name: release-config   # immutable ConfigMap — also mountable as volume
+      # defaultMode: 0444    # optional: permission for all files in this volume (default 0644)
+
+  containers:
+  - name: app
+    image: busybox:1.36
+    command:
+    - sh
+    - -c
+    - |
+      echo "=== nginx.conf ==="
+      cat /etc/nginx/nginx/nginx.conf
+      echo ""
+      echo "=== app.properties ==="
+      cat /etc/nginx/app.properties
+      echo ""
+      echo "=== release files ==="
+      ls /etc/release/
+      echo ""
+      echo "=== RELEASE_VERSION ==="
+      cat /etc/release/RELEASE_VERSION
+      sleep 3600
+    volumeMounts:
+    - name: config-files
+      mountPath: /etc/nginx
+      readOnly: true
+    - name: release-files
+      mountPath: /etc/release
+      readOnly: true
+  restartPolicy: Never

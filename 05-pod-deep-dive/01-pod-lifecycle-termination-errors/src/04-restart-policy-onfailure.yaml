@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: restart-onfailure-demo
+spec:
+  restartPolicy: OnFailure     # Restart only if exit code is non-zero
+  containers:
+    - name: csv-processor
+      image: busybox:1.36
+      command:
+        - sh
+        - -c
+        - |
+          echo "Processing CSV file..."
+          sleep 5
+          echo "Processing complete"
+          exit 1               # Simulates a successful batch job completion

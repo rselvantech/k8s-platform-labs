@@ -1,0 +1,27 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web-deploy
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: web
+  template:
+    metadata:
+      labels:
+        app: web
+        tier: frontend
+    spec:
+      terminationGracePeriodSeconds: 0
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels:
+                  app: web          # spread web pods — one per node
+              topologyKey: kubernetes.io/hostname
+      containers:
+        - name: web
+          image: busybox
+          command: ["sh", "-c", "sleep 3600"]

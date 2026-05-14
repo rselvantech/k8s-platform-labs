@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: namespace-quota
+  namespace: default
+spec:
+  hard:
+    requests.cpu: "2"           # total CPU requests across all pods ≤ 2
+    requests.memory: "1Gi"      # total memory requests across all pods ≤ 1Gi
+    limits.cpu: "4"             # total CPU limits across all pods ≤ 4
+    limits.memory: "2Gi"        # total memory limits across all pods ≤ 2Gi
+    pods: "10"                  # max pods in namespace ≤ 10
+    services: "5"               # max services in namespace ≤ 5
+    persistentvolumeclaims: "4" # max PVCs in namespace ≤ 4

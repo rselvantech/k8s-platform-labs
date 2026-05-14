@@ -1,0 +1,35 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: green-deploy
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: green-app
+  template:
+    metadata:
+      labels:
+        app: green-app
+    spec:
+      terminationGracePeriodSeconds: 0
+      # Toleration — permits this pod onto the green tainted node
+      tolerations:
+        - key: "team"
+          operator: "Equal"
+          value: "green"
+          effect: "NoSchedule"
+      # Node Affinity — attracts this pod strictly to the green node
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: team
+                    operator: In
+                    values:
+                      - green
+      containers:
+        - name: app
+          image: busybox
+          command: ["sh", "-c", "sleep 3600"]

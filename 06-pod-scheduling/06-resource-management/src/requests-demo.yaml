@@ -1,0 +1,23 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: requests-demo
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: requests-demo
+  template:
+    metadata:
+      labels:
+        app: requests-demo
+    spec:
+      terminationGracePeriodSeconds: 0
+      containers:
+        - name: app
+          image: busybox
+          command: ["sh", "-c", "sleep 3600"]
+          resources:
+            requests:
+              cpu: "250m"       # scheduler reserves 0.25 CPU per pod
+              memory: "64Mi"    # scheduler reserves 64Mi per pod

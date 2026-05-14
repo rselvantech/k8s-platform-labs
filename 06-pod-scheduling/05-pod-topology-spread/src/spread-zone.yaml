@@ -1,0 +1,27 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: spread-zone-deploy
+spec:
+  replicas: 6
+  selector:
+    matchLabels:
+      app: spread-zone
+  template:
+    metadata:
+      labels:
+        app: spread-zone
+    spec:
+      terminationGracePeriodSeconds: 0
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: DoNotSchedule
+          nodeTaintsPolicy: Honor
+          labelSelector:
+            matchLabels:
+              app: spread-zone
+      containers:
+        - name: app
+          image: busybox
+          command: ["sh", "-c", "sleep 3600"]

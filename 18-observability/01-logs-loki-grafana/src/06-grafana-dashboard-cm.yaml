@@ -1,0 +1,18 @@
+Panel 1 — Log Volume (time series)
+  Type:  time series graph
+  Query: sum by (namespace) (count_over_time({cluster="$cluster"}[$__interval]))
+  Shows: log ingestion rate per namespace over time
+  Variable: $cluster → selected by dashboard dropdown
+
+Panel 2 — Log Stream (logs panel)
+  Type:  Grafana Logs panel
+  Query: {cluster="$cluster", namespace="$namespace", pod=~"$pod"}
+  Shows: actual log lines, coloured by level
+  Variables: $cluster, $namespace, $pod → all filterable by dropdown
+
+Panel 3 — Error Rate (time series)
+  Type:  time series graph
+  Query: sum by (pod) (rate({cluster="$cluster", namespace="$namespace"}
+           |= "error" [5m]))
+  Shows: error log rate per pod over 5-minute windows
+  Useful for spotting which pod generates most errors

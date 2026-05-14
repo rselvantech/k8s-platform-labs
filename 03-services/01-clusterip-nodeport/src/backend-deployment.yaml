@@ -1,0 +1,29 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: backend-deploy
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: backend
+  template:
+    metadata:
+      labels:
+        app: backend
+    spec:
+      terminationGracePeriodSeconds: 0
+      containers:
+        - name: backend
+          image: hashicorp/http-echo:0.2.3
+          args:
+            - "-text=Hello from backend"
+          ports:
+            - containerPort: 5678
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "32Mi"
+            limits:
+              cpu: "100m"
+              memory: "64Mi"

@@ -1,0 +1,31 @@
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: nginx-hpa-multi
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: nginx-deploy
+  minReplicas: 1
+  maxReplicas: 10
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 50
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: 70
+  # HPA uses whichever metric requires MORE replicas
+  # CPU at 90% → needs 2 replicas
+  # Memory at 85% → needs 2 replicas
+  # → HPA scales to 2 (both agree)
+  # CPU at 90% → needs 2 replicas
+  # Memory at 30% → needs 1 replica
+  # → HPA scales to 2 (CPU wins — highest wins)

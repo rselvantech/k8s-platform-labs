@@ -1,0 +1,148 @@
+---
+# RBAC: node-exporter itself doesn't call the Kubernetes API,
+# but a minimal ServiceAccount is good practice for security contexts.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: node-exporter
+  namespace: default
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: node-exporter
+  namespace: default
+  labels:
+    app: node-exporter
+    version: "1.10.2"
+spec:
+  selector:
+    matchLabels:
+      app: node-exporter
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+
+  template:
+    metadata:
+      labels:
+        app: node-exporter
+      annotations:
+        # Prometheus scrape annotations — Prometheus discovers these via
+        # kubernetes_sd_configs when annotation-based discovery is configured.
+        # With the explicit relabel_configs in prometheus.yml (role: pod, label filter),
+        # these annotations are informational only in this lab.
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9100"
+        prometheus.io/path: "/metrics"
+
+    spec:
+      serviceAccountName: node-exporter
+
+      # hostPID: true — required to see the host's PID namespace.
+      # Without this, /proc inside the container shows only container processes.
+      # node-exporter needs all host PIDs for accurate CPU and process metrics.
+      hostPID: true
+
+      # hostNetwork: true — required to report real network interface metrics.
+      # Without this, only virtual interfaces (veth, docker0) are visible.
+      # Side effect: pod IP = node IP, so port 9100 is directly on the node.
+      hostNetwork: true
+
+      # All nodes — including control-plane.
+      # operator: Exists without a key tolerates ALL taints.
+      # For a monitoring agent, you want coverage on every node.
+      tolerations:
+        - operator: Exists
+
+      containers:
+        - name: node-exporter
+          image: quay.io/prometheus/node-exporter:v1.10.2
+          # quay.io is the official image registry for Prometheus project images.
+          # Docker Hub alternative: prom/node-exporter:v1.10.2
+
+          args:
+            # Read from the host filesystem mounted at /host
+            # Without these flags, node-exporter reads from /proc and /sys
+            # which inside the container point to the container's namespaces.
+            - --path.procfs=/host/proc
+            - --path.sysfs=/host/sys
+            - --path.rootfs=/host
+
+            # Exclude virtual and container filesystems from disk metrics.
+            # Without this filter, you see hundreds of overlayfs mounts
+            # (Docker image layers) which inflate and pollute filesystem metrics.
+            # $$ escapes the literal $ character in YAML multiline strings.
+            - --collector.filesystem.mount-points-exclude=^/(sys|proc|dev|host|etc)($$|/)
+
+            # Exclude loopback and virtual network interfaces from network metrics.
+            # This leaves only real node NICs (eth0, ens3, etc.)
+            - --collector.netdev.device-exclude=^(lo|veth.*|docker.*|flannel.*|cni.*)$$
+
+          ports:
+            - name: metrics
+              containerPort: 9100
+              # hostPort: binds to the node's port directly (hostNetwork mode)
+              # Prometheus scrapes the pod IP (= node IP) at port 9100
+              hostPort: 9100
+              protocol: TCP
+
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 9100
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            failureThreshold: 3
+
+          # Security: read-only root filesystem — node-exporter only reads
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 65534 # nobody
+            capabilities:
+              drop: [ALL]
+
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "32Mi"
+            limits:
+              cpu: "100m"
+              memory: "64Mi"
+            # node-exporter is lightweight — these limits are conservative.
+            # Typical actual usage: 5m CPU, 20Mi memory at idle.
+
+          volumeMounts:
+            # Host /proc — CPU, memory, process, network statistics
+            - name: proc
+              mountPath: /host/proc
+              readOnly: true
+
+            # Host /sys — hardware info, sysfs metrics
+            - name: sys
+              mountPath: /host/sys
+              readOnly: true
+
+            # Host root filesystem — disk usage, filesystem stats
+            # mountPropagation: HostToContainer ensures new mounts on the host
+            # (e.g. new volumes attached to the node) become visible in the container.
+            - name: host-root
+              mountPath: /host
+              readOnly: true
+              mountPropagation: HostToContainer
+
+      volumes:
+        - name: proc
+          hostPath:
+            path: /proc
+
+        - name: sys
+          hostPath:
+            path: /sys
+
+        - name: host-root
+          hostPath:
+            path: /

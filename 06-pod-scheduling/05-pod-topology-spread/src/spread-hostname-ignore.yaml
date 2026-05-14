@@ -1,0 +1,27 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: spread-ignore-deploy
+spec:
+  replicas: 6
+  selector:
+    matchLabels:
+      app: spread-ignore
+  template:
+    metadata:
+      labels:
+        app: spread-ignore
+    spec:
+      terminationGracePeriodSeconds: 0
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: DoNotSchedule
+          # nodeTaintsPolicy not set → default is Ignore
+          labelSelector:
+            matchLabels:
+              app: spread-ignore
+      containers:
+        - name: app
+          image: busybox
+          command: ["sh", "-c", "sleep 3600"]

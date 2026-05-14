@@ -1,0 +1,10 @@
+Before (Lab 03 — stdout):          After (this lab — Loki):
+──────────────────────────         ────────────────────────────────────────
+[OUTPUT]                           [OUTPUT]
+    Name   stdout                      Name   loki
+    Match  *                           Match  *
+    Format json                        Host   loki.monitoring.svc.cluster.local
+                                       Port   3100
+                                       Labels job=fluent-bit, cluster=3node
+                                       Structured_Metadata pod=$kubernetes['pod_name']
+                                       Auto_Kubernetes_Labels on

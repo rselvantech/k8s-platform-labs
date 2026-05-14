@@ -1,0 +1,11 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: qos-besteffort
+spec:
+  terminationGracePeriodSeconds: 0
+  containers:
+    - name: app
+      image: busybox
+      command: ["sh", "-c", "sleep 3600"]
+      # No resources section at all

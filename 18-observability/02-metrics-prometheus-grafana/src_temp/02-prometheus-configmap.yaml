@@ -1,0 +1,114 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-config
+  namespace: monitoring
+  labels:
+    app: prometheus
+data:
+  prometheus.yml: |
+    # ── Global settings ───────────────────────────────────────────────
+    global:
+      scrape_interval: 15s       # How often Prometheus scrapes each target
+      evaluation_interval: 15s   # How often alerting rules are evaluated
+      scrape_timeout: 10s        # Abort scrape if no response in 10 seconds
+
+      # external_labels are added to EVERY metric scraped by this Prometheus.
+      # This is the multi-cluster key — change "3node" per minikube profile.
+      # In Grafana, the $cluster variable queries label_values(cluster) from
+      # Prometheus to populate the dropdown — this label is what it finds.
+      external_labels:
+        cluster: 3node
+
+    # ── Scrape configurations ─────────────────────────────────────────
+    scrape_configs:
+
+      # ── Prometheus self-monitoring ───────────────────────────────────
+      # Prometheus scrapes its own /metrics endpoint so you can monitor
+      # Prometheus itself (scrape duration, rule evaluations, TSDB stats).
+      - job_name: prometheus
+        static_configs:
+          - targets: [localhost:9090]
+
+      # ── node-exporter via Kubernetes pod discovery ───────────────────
+      # Uses the Kubernetes API to discover pods with label app=node-exporter.
+      # When a new node-exporter pod appears (e.g. new DaemonSet pod on a new node),
+      # Prometheus discovers it automatically in the next scrape cycle.
+      - job_name: node-exporter
+        kubernetes_sd_configs:
+          - role: pod               # Discover pods (not nodes, services, or endpoints)
+            namespaces:
+              names: [default]      # Only look in the default namespace
+                                    # node-exporter DaemonSet runs in default namespace
+
+        relabel_configs:
+          # ── Filter: only scrape node-exporter pods ───────────────────
+          # __meta_kubernetes_pod_label_<labelname> comes from the pod's labels.
+          # Keep only pods where label app=node-exporter matches.
+          - source_labels: [__meta_kubernetes_pod_label_app]
+            regex: node-exporter
+            action: keep
+
+          # ── Set scrape address: pod IP + port 9100 ───────────────────
+          # node-exporter uses hostNetwork: true, so pod IP == node IP.
+          # Without this, Prometheus would try the pod's cluster IP (which
+          # for hostNetwork pods equals the node IP anyway, but being
+          # explicit is clearer and works in all network configurations).
+          - source_labels: [__meta_kubernetes_pod_ip]
+            replacement: '${1}:9100'
+            target_label: __address__
+
+          # ── Preserve node name as a metric label ─────────────────────
+          # __meta_kubernetes_pod_node_name contains the Kubernetes node name.
+          # Mapping it to "node" label lets you filter metrics by node in PromQL:
+          #   node_cpu_seconds_total{node="3node-m02"}
+          - source_labels: [__meta_kubernetes_pod_node_name]
+            target_label: node
+
+          # ── Preserve namespace as a metric label ──────────────────────
+          - source_labels: [__meta_kubernetes_namespace]
+            target_label: namespace
+
+          # ── Preserve pod name as a metric label ───────────────────────
+          - source_labels: [__meta_kubernetes_pod_name]
+            target_label: pod
+
+      # ── Kubernetes API server metrics (optional) ─────────────────────
+      # Uncomment to scrape the Kubernetes API server's own metrics.
+      # Useful for monitoring API server latency and request rates.
+      #
+      # - job_name: kubernetes-apiserver
+      #   kubernetes_sd_configs:
+      #     - role: endpoints
+      #   scheme: https
+      #   tls_config:
+      #     ca_file: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+      #   bearer_token_file: /var/run/secrets/kubernetes.io/serviceaccount/token
+      #   relabel_configs:
+      #     - source_labels: [__meta_kubernetes_namespace,
+      #                        __meta_kubernetes_service_name,
+      #                        __meta_kubernetes_endpoint_port_name]
+      #       action: keep
+      #       regex: default;kubernetes;https
+
+      # ── kubelet cAdvisor metrics (optional) ──────────────────────────
+      # Uncomment to scrape container-level CPU/memory from kubelet's cAdvisor.
+      # These metrics enable per-pod resource usage dashboards.
+      #
+      # - job_name: kubernetes-cadvisor
+      #   kubernetes_sd_configs:
+      #     - role: node
+      #   scheme: https
+      #   tls_config:
+      #     ca_file: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+      #     insecure_skip_verify: true
+      #   bearer_token_file: /var/run/secrets/kubernetes.io/serviceaccount/token
+      #   relabel_configs:
+      #     - action: labelmap
+      #       regex: __meta_kubernetes_node_label_(.+)
+      #     - target_label: __address__
+      #       replacement: kubernetes.default.svc:443
+      #     - source_labels: [__meta_kubernetes_node_name]
+      #       regex: (.+)
+      #       target_label: __metrics_path__
+      #       replacement: /api/v1/nodes/${1}/proxy/metrics/cadvisor

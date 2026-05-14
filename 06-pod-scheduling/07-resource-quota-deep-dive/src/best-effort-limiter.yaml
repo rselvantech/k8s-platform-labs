@@ -1,0 +1,12 @@
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: best-effort-limiter
+  namespace: quota-demo
+spec:
+  hard:
+    pods: "4"
+  scopeSelector:
+    matchExpressions:
+    - scopeName: BestEffort
+      operator: Exists

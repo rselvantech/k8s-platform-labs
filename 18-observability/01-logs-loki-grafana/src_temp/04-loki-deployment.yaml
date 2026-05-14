@@ -1,0 +1,106 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: loki
+  namespace: monitoring
+  labels:
+    app: loki
+    version: "3.7.1"
+spec:
+  replicas:
+    1 # Monolithic mode: single replica
+    # Simple scalable: separate read/write replicas
+  selector:
+    matchLabels:
+      app: loki
+  template:
+    metadata:
+      labels:
+        app: loki
+    spec:
+      # Security: run as non-root user
+      securityContext:
+        fsGroup: 10001 # Volume ownership for /loki mount
+        runAsUser: 10001
+        runAsGroup: 10001
+        runAsNonRoot: true
+
+      containers:
+        - name: loki
+          image: grafana/loki:3.7.1
+          args:
+            - -config.file=/etc/loki/loki.yaml
+            - -target=all # monolithic mode: run all components in this pod
+              # Other valid values: read, write, backend (simple scalable)
+          ports:
+            - name: http
+              containerPort: 3100 # HTTP API — Fluent Bit pushes here, Grafana queries here
+            - name: grpc
+              containerPort: 9096 # gRPC — internal component communication
+
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: 3100
+            initialDelaySeconds: 30 # Loki needs time to initialise TSDB index
+            periodSeconds: 10
+            failureThreshold: 3
+
+          livenessProbe:
+            httpGet:
+              path: /ready
+              port: 3100
+            initialDelaySeconds: 60
+            periodSeconds: 30
+            failureThreshold: 5
+
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "256Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+            # Production sizing guide:
+            #   Ingester:  500m CPU, 2Gi memory per replica
+            #   Querier:   250m CPU, 1Gi memory per replica
+            #   Compactor: 100m CPU, 512Mi memory
+
+          volumeMounts:
+            - name: config
+              mountPath: /etc/loki/loki.yaml
+              subPath: loki.yaml # Mount only the config file key
+            - name: storage
+              mountPath: /loki # PVC mounted here — chunks and index live here
+
+      volumes:
+        - name: config
+          configMap:
+            name: loki-config
+        - name: storage
+          persistentVolumeClaim:
+            claimName: loki-storage # PVC created in 02-loki-pvc.yaml
+
+---
+# ClusterIP Service — reachable from inside the cluster only
+# Fluent Bit uses DNS: loki.monitoring.svc.cluster.local:3100
+# Grafana uses the same DNS in datasource config (access: proxy)
+apiVersion: v1
+kind: Service
+metadata:
+  name: loki
+  namespace: monitoring
+  labels:
+    app: loki
+spec:
+  type: ClusterIP # Not exposed outside cluster — Grafana proxies queries
+  selector:
+    app: loki
+  ports:
+    - name: http
+      port: 3100
+      targetPort: 3100
+    - name: grpc
+      port: 9096
+      targetPort: 9096

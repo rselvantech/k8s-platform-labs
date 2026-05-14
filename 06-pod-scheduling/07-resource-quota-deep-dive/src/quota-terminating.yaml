@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: terminating-quota
+  namespace: quota-demo
+spec:
+  hard:
+    pods: "5"
+    requests.cpu: "1"
+    requests.memory: "1Gi"
+  scopeSelector:
+    matchExpressions:
+      - scopeName: Terminating
+        operator: Exists

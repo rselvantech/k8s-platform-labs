@@ -1,0 +1,156 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: grafana
+  namespace: monitoring
+  labels:
+    app: grafana
+    version: "12.4.2"
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: grafana
+  template:
+    metadata:
+      labels:
+        app: grafana
+    spec:
+      securityContext:
+        fsGroup: 472 # Grafana's default GID — required for volume write access
+        runAsUser: 472
+        runAsGroup: 472
+        runAsNonRoot: true
+
+      initContainers:
+        # Copy dashboard JSON files to the path Grafana reads from.
+        # The provisioner config in 06-grafana-dashboard-cm.yaml points to
+        # /var/lib/grafana/dashboards — this init container populates it.
+        - name: copy-dashboards
+          image: busybox:1.36
+          command:
+            - sh
+            - -c
+            - |
+              mkdir -p /var/lib/grafana/dashboards
+              cp /tmp/dashboards/kubernetes-logs.json /var/lib/grafana/dashboards/
+              echo "Dashboard files copied successfully"
+          volumeMounts:
+            - name: dashboard-source
+              mountPath: /tmp/dashboards
+            - name: dashboard-target
+              mountPath: /var/lib/grafana/dashboards
+          securityContext:
+            runAsUser: 0 # initContainer runs as root to ensure copy succeeds
+
+      containers:
+        - name: grafana
+          image: grafana/grafana:12.4.2
+
+          env:
+            - name: GF_SECURITY_ADMIN_USER
+              value: admin
+            - name: GF_SECURITY_ADMIN_PASSWORD
+              value: admin
+              # Production: use a Secret, not a plain-text env var
+              # valueFrom:
+              #   secretKeyRef:
+              #     name: grafana-secret
+              #     key: admin-password
+            - name: GF_AUTH_ANONYMOUS_ENABLED
+              value: "false"
+            - name: GF_PATHS_PROVISIONING
+              value: /etc/grafana/provisioning
+            - name: GF_PATHS_DASHBOARDS
+              value: /var/lib/grafana/dashboards
+            # Log level: info, debug, warn, error, critical
+            - name: GF_LOG_LEVEL
+              value: warn
+
+          ports:
+            - name: http
+              containerPort: 3000
+
+          readinessProbe:
+            httpGet:
+              path: /api/health
+              port: 3000
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            failureThreshold: 3
+
+          livenessProbe:
+            httpGet:
+              path: /api/health
+              port: 3000
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            failureThreshold: 5
+
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+
+          volumeMounts:
+            # Datasource provisioning — loaded at startup from this directory
+            - name: datasources
+              mountPath: /etc/grafana/provisioning/datasources
+            # Dashboard provisioning config — loaded at startup
+            - name: dashboard-provisioner
+              mountPath: /etc/grafana/provisioning/dashboards
+            # Dashboard JSON files — populated by initContainer
+            - name: dashboard-target
+              mountPath: /var/lib/grafana/dashboards
+
+      volumes:
+        - name: datasources
+          configMap:
+            name: grafana-datasources
+            items:
+              - key: datasources.yaml
+                path: datasources.yaml
+
+        - name: dashboard-provisioner
+          configMap:
+            name: grafana-dashboard-kubernetes-logs
+            items:
+              - key: dashboards.yaml
+                path: dashboards.yaml
+
+        - name: dashboard-source
+          configMap:
+            name: grafana-dashboard-kubernetes-logs
+            items:
+              - key: kubernetes-logs.json
+                path: kubernetes-logs.json
+
+        - name: dashboard-target
+          emptyDir: {} # Shared between initContainer and main container
+            # initContainer writes, Grafana reads
+---
+# NodePort Service — expose Grafana at a fixed port on every node
+# Access via: minikube service grafana -n monitoring --url --profile 3node
+# Or directly: http://<minikube-ip>:30300
+apiVersion: v1
+kind: Service
+metadata:
+  name: grafana
+  namespace: monitoring
+  labels:
+    app: grafana
+spec:
+  type: NodePort
+  selector:
+    app: grafana
+  ports:
+    - name: http
+      port: 3000
+      targetPort: 3000
+      nodePort:
+        30300 # Fixed port on the minikube node
+        # Production: use LoadBalancer or Ingress instead of NodePort

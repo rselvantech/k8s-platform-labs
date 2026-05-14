@@ -1,0 +1,43 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: ds-workers-only
+spec:
+  selector:
+    matchLabels:
+      app: ds-workers-only
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+  template:
+    metadata:
+      labels:
+        app: ds-workers-only
+    spec:
+      # Approach A: Simply omit the control-plane toleration.
+      # The control-plane node carries taint:
+      #   node-role.kubernetes.io/control-plane:NoSchedule
+      # Without a matching toleration, the controller skips it.
+      # DESIRED = 2 (worker nodes only)
+      #
+      # NO tolerations block here — that is the entire point.
+
+      # Approach B (alternative — uncomment to use):
+      # affinity:
+      #   nodeAffinity:
+      #     requiredDuringSchedulingIgnoredDuringExecution:
+      #       nodeSelectorTerms:
+      #         - matchExpressions:
+      #             - key: node-role.kubernetes.io/control-plane
+      #               operator: DoesNotExist   # Exclude control-plane nodes explicitly
+      containers:
+        - name: nginx
+          image: nginx:1.27
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "64Mi"
+            limits:
+              cpu: "100m"
+              memory: "128Mi"

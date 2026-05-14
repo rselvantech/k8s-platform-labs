@@ -1,0 +1,186 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-dashboard-node-metrics
+  namespace: monitoring
+  labels:
+    app: grafana
+data:
+  # ── Dashboard provisioner config ──────────────────────────────────────
+  # Note: Lab 01 already mounted a dashboards provisioner ConfigMap (dashboards.yaml)
+  # that points to /var/lib/grafana/dashboards. This file adds to the same provider,
+  # which is why both dashboard JSON files end up in the same Grafana folder.
+  # The Grafana Deployment's initContainer copies JSON files from ConfigMaps to
+  # /var/lib/grafana/dashboards — update the initContainer to copy this file too.
+  # (See Step 7 in the README for the exact kubectl patch command.)
+  node-metrics.json: |
+    {
+      "title": "Node Metrics",
+      "uid": "node-metrics-v1",
+      "schemaVersion": 38,
+      "version": 1,
+      "refresh": "30s",
+      "time": { "from": "now-1h", "to": "now" },
+      "description": "Node-level OS metrics from Prometheus node-exporter. For the full community dashboard, import ID 1860 from grafana.com (see README Step 8).",
+      "templating": {
+        "list": [
+          {
+            "name": "cluster",
+            "label": "Cluster",
+            "type": "query",
+            "datasource": { "type": "prometheus", "uid": "prometheus-datasource" },
+            "query": "label_values(node_uname_info, cluster)",
+            "refresh": 2,
+            "sort": 1,
+            "multi": false,
+            "includeAll": false,
+            "description": "Kubernetes cluster — populated by Prometheus external_labels.cluster"
+          },
+          {
+            "name": "node",
+            "label": "Node",
+            "type": "query",
+            "datasource": { "type": "prometheus", "uid": "prometheus-datasource" },
+            "query": "label_values(node_uname_info{cluster=\"$cluster\"}, node)",
+            "refresh": 2,
+            "sort": 1,
+            "multi": false,
+            "includeAll": true,
+            "allValue": ".*",
+            "description": "Kubernetes node name"
+          }
+        ]
+      },
+      "panels": [
+        {
+          "id": 1,
+          "title": "CPU Usage % — by Node",
+          "description": "Percentage of CPU time NOT idle. Formula: 100 - avg(idle_rate) * 100. Averaged across all cores per node.",
+          "type": "timeseries",
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+          "datasource": { "type": "prometheus", "uid": "prometheus-datasource" },
+          "targets": [
+            {
+              "expr": "100 - (avg by (node) (rate(node_cpu_seconds_total{cluster=\"$cluster\", node=~\"$node\", mode=\"idle\"}[5m])) * 100)",
+              "legendFormat": "{{node}}",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "percent",
+              "min": 0,
+              "max": 100,
+              "custom": { "lineWidth": 2 }
+            }
+          },
+          "options": {
+            "legend": { "displayMode": "table", "placement": "bottom" }
+          }
+        },
+        {
+          "id": 2,
+          "title": "Memory Usage % — by Node",
+          "description": "Used memory as % of total. Uses MemAvailable (includes reclaimable cache) — more accurate than MemFree.",
+          "type": "timeseries",
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+          "datasource": { "type": "prometheus", "uid": "prometheus-datasource" },
+          "targets": [
+            {
+              "expr": "(node_memory_MemTotal_bytes{cluster=\"$cluster\", node=~\"$node\"} - node_memory_MemAvailable_bytes{cluster=\"$cluster\", node=~\"$node\"}) / node_memory_MemTotal_bytes{cluster=\"$cluster\", node=~\"$node\"} * 100",
+              "legendFormat": "{{node}}",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "percent",
+              "min": 0,
+              "max": 100,
+              "custom": { "lineWidth": 2 }
+            }
+          }
+        },
+        {
+          "id": 3,
+          "title": "Disk Usage % — Root Filesystem",
+          "description": "Used disk space as % of total on the root (/) filesystem. Excludes overlay and virtual filesystems.",
+          "type": "gauge",
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+          "datasource": { "type": "prometheus", "uid": "prometheus-datasource" },
+          "targets": [
+            {
+              "expr": "(node_filesystem_size_bytes{cluster=\"$cluster\", node=~\"$node\", mountpoint=\"/\", fstype!=\"tmpfs\"} - node_filesystem_avail_bytes{cluster=\"$cluster\", node=~\"$node\", mountpoint=\"/\", fstype!=\"tmpfs\"}) / node_filesystem_size_bytes{cluster=\"$cluster\", node=~\"$node\", mountpoint=\"/\", fstype!=\"tmpfs\"} * 100",
+              "legendFormat": "{{node}}",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "percent",
+              "min": 0,
+              "max": 100,
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  { "color": "green", "value": null },
+                  { "color": "yellow", "value": 70 },
+                  { "color": "red", "value": 90 }
+                ]
+              }
+            }
+          }
+        },
+        {
+          "id": 4,
+          "title": "Network Receive Rate — bytes/sec",
+          "description": "Bytes received per second on real NICs. Excludes lo, veth, docker, flannel, and CNI virtual interfaces.",
+          "type": "timeseries",
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+          "datasource": { "type": "prometheus", "uid": "prometheus-datasource" },
+          "targets": [
+            {
+              "expr": "rate(node_network_receive_bytes_total{cluster=\"$cluster\", node=~\"$node\", device!~\"lo|veth.*|docker.*|flannel.*|cni.*\"}[5m])",
+              "legendFormat": "{{node}} — {{device}}",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "Bps",
+              "custom": { "lineWidth": 2 }
+            }
+          }
+        },
+        {
+          "id": 5,
+          "title": "Load Average",
+          "description": "1-minute, 5-minute, and 15-minute load averages per node. Values above CPU core count indicate CPU saturation.",
+          "type": "timeseries",
+          "gridPos": { "h": 8, "w": 24, "x": 0, "y": 16 },
+          "datasource": { "type": "prometheus", "uid": "prometheus-datasource" },
+          "targets": [
+            {
+              "expr": "node_load1{cluster=\"$cluster\", node=~\"$node\"}",
+              "legendFormat": "{{node}} — 1m",
+              "refId": "A"
+            },
+            {
+              "expr": "node_load5{cluster=\"$cluster\", node=~\"$node\"}",
+              "legendFormat": "{{node}} — 5m",
+              "refId": "B"
+            },
+            {
+              "expr": "node_load15{cluster=\"$cluster\", node=~\"$node\"}",
+              "legendFormat": "{{node}} — 15m",
+              "refId": "C"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "custom": { "lineWidth": 2 }
+            }
+          }
+        }
+      ]
+    }

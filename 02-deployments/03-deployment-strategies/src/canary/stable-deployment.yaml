@@ -1,0 +1,23 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nginx-stable
+  labels:
+    app: nginx
+spec:
+  replicas: 4           # Stable version has more pods
+  selector:
+    matchLabels:
+      app: nginx
+      track: stable
+  template:
+    metadata:
+      labels:
+        app: nginx
+        track: stable    # Stable label
+    spec:
+      containers:
+      - name: nginx
+        image: nginx:1.19
+        ports:
+        - containerPort: 80

@@ -1,0 +1,37 @@
+# Staging Wildcard Certificate
+#
+# Test certificate only — not trusted by browsers.
+# Apply this first to verify DNS-01 + IRSA + Route53 work correctly
+# before requesting a production certificate.
+#
+# Certificate created in traefik namespace because:
+#   - cert-manager stores the cert as a Kubernetes Secret in this namespace
+#   - Traefik can only read Secrets in its own namespace (traefik)
+#   - If created in otel-demo namespace, Traefik cannot access the Secret
+# ---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: wildcard-rselvantech-stg
+  namespace: traefik    # must be same namespace as Traefik
+spec:
+  # Secret name where cert-manager stores the certificate and private key
+  # Traefik IngressRoute references this name in tls.secretName
+  secretName: wildcard-rselvantech-stg-tls
+
+  issuerRef:
+    name: letsencrypt-staging
+    kind: ClusterIssuer
+    group: cert-manager.io
+
+  # Domain names covered by this certificate
+  # *.rselvantech.com covers all subdomains (app, grafana, jaeger, etc.)
+  # rselvantech.com must be listed separately — wildcard does not cover apex domain
+  dnsNames:
+    - "*.rselvantech.com"
+    - "rselvantech.com"
+
+  # Certificate duration and renewal
+  # Let's Encrypt issues 90-day certificates — these values must not exceed that
+  duration: 2160h       # 90 days
+  renewBefore: 720h     # renew 30 days before expiry

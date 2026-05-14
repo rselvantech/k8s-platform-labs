@@ -1,0 +1,35 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: yellow-deploy
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: yellow-app
+  template:
+    metadata:
+      labels:
+        app: yellow-app
+    spec:
+      terminationGracePeriodSeconds: 0
+      # Toleration — permits this pod onto the yellow tainted node
+      tolerations:
+        - key: "team"
+          operator: "Equal"
+          value: "yellow"
+          effect: "NoSchedule"
+      # Node Affinity — attracts this pod strictly to the yellow node
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: team
+                    operator: In
+                    values:
+                      - yellow
+      containers:
+        - name: app
+          image: busybox
+          command: ["sh", "-c", "sleep 3600"]

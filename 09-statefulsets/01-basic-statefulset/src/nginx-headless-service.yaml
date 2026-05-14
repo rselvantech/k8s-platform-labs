@@ -1,0 +1,28 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: nginx             # This name becomes part of every pod's DNS hostname:
+                          # <pod-name>.nginx.<namespace>.svc.cluster.local
+  namespace: default
+  labels:
+    app: nginx
+spec:
+  clusterIP: None         # ← This is what makes it Headless.
+                          #   None = no virtual IP assigned.
+                          #   DNS returns pod IPs directly.
+                          #   Required for StatefulSet per-pod DNS records.
+
+  selector:
+    app: nginx            # Selects pods with this label (the StatefulSet pods)
+
+  ports:
+    - name: http
+      port: 80
+      targetPort: 80
+
+  # publishNotReadyAddresses: false (default)
+  # When false: only Ready pods appear in DNS.
+  # When true:  all pods appear in DNS even before they pass readiness probe.
+  # Set to true for applications that need to discover peers before they are
+  # fully ready (e.g. Elasticsearch cluster formation, Zookeeper quorum setup).
+  publishNotReadyAddresses: false

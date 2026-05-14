@@ -1,0 +1,36 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: spread-affinity-deploy
+spec:
+  replicas: 4
+  selector:
+    matchLabels:
+      app: spread-affinity
+  template:
+    metadata:
+      labels:
+        app: spread-affinity
+    spec:
+      terminationGracePeriodSeconds: 0
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: node-role
+                    operator: In
+                    values:
+                      - storage
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: DoNotSchedule
+          nodeTaintsPolicy: Honor
+          labelSelector:
+            matchLabels:
+              app: spread-affinity
+      containers:
+        - name: app
+          image: busybox
+          command: ["sh", "-c", "sleep 3600"]

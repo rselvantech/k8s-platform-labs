@@ -1,0 +1,52 @@
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: multi-path-advanced
+  namespace: otel-demo
+spec:
+  entryPoints:
+    - web  # HTTP entry point (port 80)
+
+  routes:
+  # Route 1: Frontend - catch-all for root path
+  # Priority 1 (lowest) - evaluated last
+  # Excludes /grafana and /jaeger to prevent shadowing
+  - match: PathPrefix(`/`) && !PathPrefix(`/grafana`) && !PathPrefix(`/jaeger`)
+    kind: Rule
+    priority: 1
+    services:
+    - name: frontend-proxy
+      port: 8080
+
+  # Route 2: Grafana - no middleware needed
+  # Grafana already configured with root_url=/grafana in ConfigMap
+  # Priority 10 - evaluated before root catch-all
+  - match: PathPrefix(`/grafana`)
+    kind: Rule
+    priority: 10
+    services:
+    - name: grafana
+      port: 80
+
+  # Route 3: Jaeger redirect - /jaeger and /jaeger/ only
+  # Redirects browser to /jaeger/ui/ so React router URL matches base href
+  # Priority 20 (highest) - evaluated first for exact /jaeger paths
+  - match: Path(`/jaeger`) || Path(`/jaeger/`)
+    kind: Rule
+    priority: 20
+    middlewares:
+    - name: jaeger-redirect
+    services:
+    - name: jaeger
+      port: 16686
+
+  # Route 4: Jaeger UI - forward /jaeger/ui/* as-is
+  # Handles: UI pages, static assets (/jaeger/ui/static/*)
+  # and API calls (/jaeger/ui/api/services)
+  # Priority 15 - evaluated before root catch-all, after redirect
+  - match: PathPrefix(`/jaeger/ui`)
+    kind: Rule
+    priority: 15
+    services:
+    - name: jaeger
+      port: 16686

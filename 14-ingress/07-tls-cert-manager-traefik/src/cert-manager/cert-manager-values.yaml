@@ -1,0 +1,51 @@
+# cert-manager Helm values
+# Chart: jetstack/cert-manager  version: v1.17.2
+# Docs: https://cert-manager.io/docs/installation/helm/
+# ---
+
+# Install CRDs as part of the Helm release (recommended since v1.15)
+# CRDs: Certificate, ClusterIssuer, Issuer, CertificateRequest, Order, Challenge
+crds:
+  enabled: true
+
+# Use the pre-existing ServiceAccount created by eksctl with IRSA annotation.
+# Do NOT create a new ServiceAccount here — Helm would overwrite the eksctl-created
+# one and lose the IAM role annotation, breaking Route53 access.
+serviceAccount:
+  create: false
+  name: cert-manager   # must match the name used in: eksctl create iamserviceaccount --name cert-manager
+
+# Required for IRSA — tells cert-manager to use ambient AWS credentials
+# (the IRSA token projected into the pod) when no explicit credentials are
+# specified in the ClusterIssuer. Without this, IRSA tokens are ignored.
+extraArgs:
+  - --issuer-ambient-credentials=true
+
+# fsGroup required for cert-manager to read the IRSA projected ServiceAccount
+# token from the filesystem (correct file permissions for the process)
+securityContext:
+  fsGroup: 1001
+
+# Resource limits — sized for t3.small nodes (1 vCPU, 2GB RAM)
+resources:
+  requests:
+    cpu: 10m
+    memory: 32Mi
+  limits:
+    memory: 64Mi
+
+webhook:
+  resources:
+    requests:
+      cpu: 10m
+      memory: 32Mi
+    limits:
+      memory: 64Mi
+
+cainjector:
+  resources:
+    requests:
+      cpu: 10m
+      memory: 32Mi
+    limits:
+      memory: 64Mi

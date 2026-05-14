@@ -1,0 +1,9 @@
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: web-pdb-min-pct
+spec:
+  minAvailable: "60%"
+  selector:
+    matchLabels:
+      app: web

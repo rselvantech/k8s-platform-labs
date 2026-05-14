@@ -1,0 +1,31 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: redis-with-probe
+  labels:
+    app: redis
+spec:
+  containers:
+    - name: redis
+      image: redis:7
+      ports:
+        - containerPort: 6379
+      readinessProbe:
+        tcpSocket:
+          port: 6379             # Attempt TCP connection to port 6379
+        initialDelaySeconds: 5   # Redis starts in ~2s — 5s buffer
+        periodSeconds: 10
+        failureThreshold: 3
+      livenessProbe:
+        tcpSocket:
+          port: 6379             # Same check — is Redis still listening?
+        initialDelaySeconds: 15  # More time before liveness starts
+        periodSeconds: 20
+        failureThreshold: 3
+      resources:
+        requests:
+          cpu: "100m"
+          memory: "64Mi"
+        limits:
+          cpu: "200m"
+          memory: "128Mi"

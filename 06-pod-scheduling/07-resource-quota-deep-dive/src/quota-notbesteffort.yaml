@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: notbesteffort-quota
+  namespace: quota-demo
+spec:
+  hard:
+    pods: "5"
+    requests.cpu: "2"
+    requests.memory: "2Gi"
+  scopeSelector:
+    matchExpressions:
+      - scopeName: NotBestEffort
+        operator: Exists

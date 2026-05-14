@@ -1,0 +1,27 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cache-deploy
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: cache
+  template:
+    metadata:
+      labels:
+        app: cache
+        tier: cache
+    spec:
+      terminationGracePeriodSeconds: 0
+      affinity:
+        podAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels:
+                  app: web          # co-locate with web pods
+              topologyKey: kubernetes.io/hostname  # on the SAME node
+      containers:
+        - name: cache
+          image: busybox
+          command: ["sh", "-c", "sleep 3600"]

@@ -1,0 +1,102 @@
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: node-exporter
+  namespace: default
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: node-exporter
+  namespace: default
+  labels:
+    app: node-exporter
+    version: "1.10.2"
+spec:
+  selector:
+    matchLabels:
+      app: node-exporter
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+  template:
+    metadata:
+      labels:
+        app: node-exporter
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9100"
+    spec:
+      serviceAccountName: node-exporter
+      # hostPID: required to see the host PID namespace.
+      # Without it /proc shows only container processes — CPU and process metrics wrong.
+      hostPID: true
+      # hostNetwork: required for real NIC metrics.
+      # Without it only virtual interfaces (veth, docker0) visible.
+      # Side effect: pod IP = node IP, port 9100 bound directly on node.
+      hostNetwork: true
+      # Tolerate ALL taints — monitor every node including control-plane.
+      tolerations:
+        - operator: Exists
+      containers:
+        - name: node-exporter
+          image: quay.io/prometheus/node-exporter:v1.10.2
+          args:
+            - --path.procfs=/host/proc    # Read host /proc, not container's
+            - --path.sysfs=/host/sys      # Read host /sys, not container's
+            - --path.rootfs=/host         # Root of host filesystem
+            # Exclude virtual/container filesystems from disk metrics.
+            # Without this filter, Docker image layers inflate disk stats.
+            # $$ escapes the literal $ in YAML multiline strings.
+            - --collector.filesystem.mount-points-exclude=^/(sys|proc|dev|host|etc)($$|/)
+            # Exclude loopback and virtual network interfaces.
+            - --collector.netdev.device-exclude=^(lo|veth.*|docker.*|flannel.*|cni.*)$$
+          ports:
+            - name: metrics
+              containerPort: 9100
+              hostPort: 9100    # Binds to node port directly (hostNetwork mode)
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 9100
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 65534    # nobody
+            capabilities:
+              drop: [ALL]
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "32Mi"
+            limits:
+              cpu: "100m"
+              memory: "64Mi"
+          volumeMounts:
+            - name: proc
+              mountPath: /host/proc
+              readOnly: true
+            - name: sys
+              mountPath: /host/sys
+              readOnly: true
+            # HostToContainer: new mounts on host become visible inside container.
+            # Required for disk stats on dynamically mounted volumes.
+            - name: host-root
+              mountPath: /host
+              readOnly: true
+              mountPropagation: HostToContainer
+      volumes:
+        - name: proc
+          hostPath:
+            path: /proc
+        - name: sys
+          hostPath:
+            path: /sys
+        - name: host-root
+          hostPath:
+            path: /

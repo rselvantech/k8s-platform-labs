@@ -1,0 +1,8 @@
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: global-quota
+  namespace: quota-demo
+spec:
+  hard:
+    pods: "10"

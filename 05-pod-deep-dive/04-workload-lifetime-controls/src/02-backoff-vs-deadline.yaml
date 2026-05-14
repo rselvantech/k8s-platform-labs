@@ -1,0 +1,15 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: demo-backoff-race
+  namespace: lifetime-demo
+spec:
+  activeDeadlineSeconds: 120      # 2-minute ceiling
+  backoffLimit: 3                 # Only 3 retries
+  template:
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: worker
+          image: busybox
+          command: ["sh", "-c", "echo 'Failing immediately'; exit 1"]

@@ -1,0 +1,11 @@
+# Grafana reads this file on startup and creates the Loki datasource
+apiVersion: 1
+datasources:
+  - name: Loki
+    type: loki
+    access: proxy         # Grafana backend proxies queries to Loki
+                          # (browser never talks to Loki directly)
+    url: http://loki.monitoring.svc.cluster.local:3100
+    isDefault: true
+    jsonData:
+      maxLines: 1000      # Maximum log lines returned per query

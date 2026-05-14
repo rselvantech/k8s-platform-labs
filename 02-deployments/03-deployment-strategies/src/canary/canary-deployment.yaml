@@ -1,0 +1,23 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nginx-canary
+  labels:
+    app: nginx
+spec:
+  replicas: 1           # Canary starts with fewer pods (10% traffic)
+  selector:
+    matchLabels:
+      app: nginx
+      track: canary
+  template:
+    metadata:
+      labels:
+        app: nginx
+        track: canary    # Canary label
+    spec:
+      containers:
+      - name: nginx
+        image: nginx:1.20  # New version
+        ports:
+        - containerPort: 80

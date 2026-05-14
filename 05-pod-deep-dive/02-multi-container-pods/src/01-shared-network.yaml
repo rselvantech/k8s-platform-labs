@@ -1,0 +1,32 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: shared-network-demo
+spec:
+  restartPolicy: Never
+  containers:
+    - name: nginx                 # Main container — serves HTTP on port 80
+      image: nginx:1.27
+      ports:
+        - containerPort: 80
+
+    - name: network-probe         # Helper container — proves shared network
+      image: busybox:1.36
+      command:
+        - sh
+        - -c
+        - |
+          echo "--- Proving shared network namespace ---"
+          echo ""
+          echo "1. My hostname:"
+          hostname
+          echo ""
+          echo "2. My IP address (same as nginx's IP):"
+          hostname -i
+          echo ""
+          echo "3. Reaching nginx via localhost (no Service needed):"
+          wget -qO- http://localhost:80 | head -5
+          echo ""
+          echo "4. Port 80 is already taken — cannot bind it:"
+          nc -l -p 80 2>&1 || echo "Port 80 is in use (expected!)"
+          sleep 3600

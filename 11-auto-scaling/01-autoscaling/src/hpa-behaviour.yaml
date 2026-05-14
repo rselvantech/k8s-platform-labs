@@ -1,0 +1,31 @@
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: nginx-hpa-behaviour
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: nginx-deploy
+  minReplicas: 1
+  maxReplicas: 10
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 50
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 60    # scale down after 60s (not default 300s)
+      policies:
+        - type: Pods
+          value: 2                       # remove at most 2 pods per minute
+          periodSeconds: 60
+    scaleUp:
+      stabilizationWindowSeconds: 0     # scale up immediately (no delay)
+      policies:
+        - type: Pods
+          value: 4                       # add at most 4 pods per 15 seconds
+          periodSeconds: 15

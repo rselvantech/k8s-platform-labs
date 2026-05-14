@@ -1,0 +1,14 @@
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: jaeger-redirect
+  namespace: otel-demo
+spec:
+  # Redirect /jaeger and /jaeger/ → /jaeger/ui/ (browser URL changes)
+  # Key learning: Jaeger React UI needs browser URL = /jaeger/ui/ to match
+  # <base href="/jaeger/ui/"> in HTML. Server-side rewrite (replacePathRegex)
+  # does not change browser URL and causes React router mismatch → blank page.
+  redirectRegex:
+    regex: "^(https?://[^/]+)/jaeger(/?)$"
+    replacement: "${1}/jaeger/ui/"
+    permanent: false

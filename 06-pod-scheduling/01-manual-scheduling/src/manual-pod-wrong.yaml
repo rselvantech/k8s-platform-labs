@@ -1,0 +1,10 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pod-manual-wrong
+spec:
+  nodeName: 3node-m03-typo    # node does not exist
+  containers:
+    - name: busybox
+      image: busybox
+      command: ["sh", "-c", "sleep 3600"]

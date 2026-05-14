@@ -1,0 +1,50 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: ds-noexecute-grace
+spec:
+  selector:
+    matchLabels:
+      app: ds-noexecute-grace
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+  template:
+    metadata:
+      labels:
+        app: ds-noexecute-grace
+    spec:
+      tolerations:
+        - key: node-role.kubernetes.io/control-plane
+          operator: Exists
+          effect: NoSchedule
+
+        # Built-in Kubernetes node condition taints — always tolerate these
+        # in DaemonSets that must stay running during node problems:
+        - key: node.kubernetes.io/not-ready
+          operator: Exists
+          effect: NoExecute
+          tolerationSeconds: 300    # Stay 5 minutes if node goes not-ready
+
+        - key: node.kubernetes.io/unreachable
+          operator: Exists
+          effect: NoExecute
+          tolerationSeconds: 300    # Stay 5 minutes if node becomes unreachable
+
+        # Custom maintenance taint with grace period:
+        - key: maintenance
+          operator: Equal
+          value: "true"
+          effect: NoExecute
+          tolerationSeconds: 120    # Stay 2 minutes after maintenance taint applied
+      containers:
+        - name: nginx
+          image: nginx:1.27
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "64Mi"
+            limits:
+              cpu: "100m"
+              memory: "128Mi"

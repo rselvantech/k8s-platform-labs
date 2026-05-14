@@ -1,0 +1,10 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: restart-never-demo
+spec:
+  restartPolicy: Never         # Never restart — stay in Completed or Error
+  containers:
+    - name: diagnostic
+      image: busybox:1.36
+      command: ["sh", "-c", "echo 'Diagnostic complete'; exit 0"]

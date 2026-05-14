@@ -1,0 +1,27 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: spread-dns-deploy
+spec:
+  replicas: 4
+  selector:
+    matchLabels:
+      app: spread-dns
+  template:
+    metadata:
+      labels:
+        app: spread-dns
+    spec:
+      terminationGracePeriodSeconds: 0
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: DoNotSchedule
+          nodeTaintsPolicy: Honor
+          labelSelector:
+            matchLabels:
+              app: spread-dns
+      containers:
+        - name: app
+          image: busybox
+          command: ["sh", "-c", "sleep 3600"]

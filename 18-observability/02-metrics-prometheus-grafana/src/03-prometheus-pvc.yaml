@@ -1,0 +1,19 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: prometheus-storage
+  namespace: monitoring
+  labels:
+    app: prometheus
+spec:
+  # minikube: "standard" StorageClass — hostPath-backed dynamic provisioning
+  # AWS EKS production: storageClassName: gp3 (requires aws-ebs-csi-driver)
+  storageClassName: standard
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 10Gi
+      # Prometheus TSDB sizing rule of thumb:
+      # bytes_per_sample(~2) × samples_per_second × retention_seconds × 2
+      # For 3 nodes, node-exporter only: 10Gi covers months of data

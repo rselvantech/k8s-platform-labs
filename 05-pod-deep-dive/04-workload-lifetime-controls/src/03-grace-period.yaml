@@ -1,0 +1,21 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: demo-grace-period
+  namespace: lifetime-demo
+spec:
+  terminationGracePeriodSeconds: 30
+  containers:
+    - name: app
+      image: busybox
+      command:
+        - sh
+        - -c
+        - |
+          trap 'echo "[SIGTERM received] starting graceful shutdown"; sleep 5; echo "[shutdown complete]"' TERM
+          echo "[app started]"
+          sleep 3600
+      lifecycle:
+        preStop:
+          exec:
+            command: ["sh", "-c", "echo '[preStop hook running]'; sleep 3"]

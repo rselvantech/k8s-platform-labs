@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: release-config
+  namespace: default
+# immutable: true seals this ConfigMap permanently
+# Updates to data/binaryData are rejected by the API server
+# kubelet stops watching it — no persistent watch connection overhead
+# Delete + recreate is the only way to change it
+immutable: true
+data:
+  RELEASE_VERSION: "v2.4.1"
+  BUILD_DATE: "2026-04-01"
+  REGION: "ca-central-1"

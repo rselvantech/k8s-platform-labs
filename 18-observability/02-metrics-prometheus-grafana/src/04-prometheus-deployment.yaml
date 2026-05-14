@@ -1,0 +1,90 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: prometheus
+  namespace: monitoring
+  labels:
+    app: prometheus
+    version: "3.10.0"
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: prometheus
+  template:
+    metadata:
+      labels:
+        app: prometheus
+    spec:
+      serviceAccountName: prometheus
+      securityContext:
+        fsGroup: 65534       # nobody GID — Prometheus default
+        runAsUser: 65534
+        runAsGroup: 65534
+        runAsNonRoot: true
+      containers:
+        - name: prometheus
+          image: prom/prometheus:v3.10.0
+          args:
+            - --config.file=/etc/prometheus/prometheus.yml
+            - --storage.tsdb.path=/prometheus          # TSDB on PVC
+            - --storage.tsdb.retention.time=15d        # Keep 15 days
+            - --storage.tsdb.retention.size=8GB        # Cap at 8GB (2GB headroom on 10Gi PVC)
+            - --web.enable-lifecycle                   # POST /-/reload to reload config
+          ports:
+            - name: http
+              containerPort: 9090
+          readinessProbe:
+            httpGet:
+              path: /-/ready
+              port: 9090
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /-/healthy
+              port: 9090
+            initialDelaySeconds: 60
+            periodSeconds: 30
+            failureThreshold: 5
+          resources:
+            requests:
+              cpu: "200m"
+              memory: "512Mi"
+            limits:
+              cpu: "1000m"
+              memory: "1Gi"
+          volumeMounts:
+            - name: config
+              mountPath: /etc/prometheus/prometheus.yml
+              subPath: prometheus.yml
+            - name: storage
+              mountPath: /prometheus
+      volumes:
+        - name: config
+          configMap:
+            name: prometheus-config
+        - name: storage
+          persistentVolumeClaim:
+            claimName: prometheus-storage
+---
+# ClusterIP Service — Grafana queries Prometheus via in-cluster DNS:
+#   http://prometheus.monitoring.svc.cluster.local:9090
+# Add nodePort: 30090 and type: NodePort for direct browser access during debugging
+apiVersion: v1
+kind: Service
+metadata:
+  name: prometheus
+  namespace: monitoring
+  labels:
+    app: prometheus
+spec:
+  type: ClusterIP
+  selector:
+    app: prometheus
+  ports:
+    - name: http
+      port: 9090
+      targetPort: 9090

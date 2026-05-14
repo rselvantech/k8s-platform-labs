@@ -1,0 +1,49 @@
+
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: multi-path-traefik
+  namespace: otel-demo
+  annotations:
+    # Apply middleware to strip /jaeger prefix
+    # Format: namespace-middlewarename@kubernetescrd
+    # Note: This applies to ALL paths in this Ingress
+    # For per-path middleware, use IngressRoute CRD instead
+    # traefik.ingress.kubernetes.io/router.middlewares: otel-demo-jaeger-stripprefix@kubernetescrd
+    traefik.ingress.kubernetes.io/router.middlewares: otel-demo-jaeger-rewrite@kubernetescrd
+spec:
+  ingressClassName: traefik
+  rules:
+  - http:
+      paths:
+      # Path 1: Frontend - Default root path
+      # Matches: /, /cart, /checkout, etc.
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: frontend-proxy
+            port:
+              number: 8080
+      
+      # Path 2: Grafana - No middleware needed
+      # Grafana already configured to expect /grafana sub-path
+      # Matches: /grafana/, /grafana/dashboard, etc.
+      - path: /grafana
+        pathType: Prefix
+        backend:
+          service:
+            name: grafana
+            port:
+              number: 80
+      
+      # Path 3: Jaeger - Middleware strips /jaeger prefix
+      # User requests /jaeger/search → Middleware strips → Jaeger receives /search
+      # Matches: /jaeger/, /jaeger/api/services, etc.
+      - path: /jaeger
+        pathType: Prefix
+        backend:
+          service:
+            name: jaeger
+            port:
+              number: 16686

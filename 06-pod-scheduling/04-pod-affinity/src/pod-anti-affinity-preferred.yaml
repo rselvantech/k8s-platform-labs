@@ -1,0 +1,28 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: anti-preferred-deploy
+spec:
+  replicas: 5
+  selector:
+    matchLabels:
+      app: anti-preferred
+  template:
+    metadata:
+      labels:
+        app: anti-preferred
+    spec:
+      terminationGracePeriodSeconds: 0
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    app: anti-preferred   # self-referencing — repel own kind
+                topologyKey: kubernetes.io/hostname
+      containers:
+        - name: app
+          image: busybox
+          command: ["sh", "-c", "sleep 3600"]

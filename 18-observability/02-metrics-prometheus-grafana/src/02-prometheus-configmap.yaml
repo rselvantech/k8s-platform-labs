@@ -1,0 +1,40 @@
+global:
+  scrape_interval: 15s        # Scrape every target every 15 seconds
+  evaluation_interval: 15s    # Evaluate alerting rules every 15 seconds
+  scrape_timeout: 10s         # Abort a scrape if no response in 10s
+
+  external_labels:
+    cluster: 3node            # Added to EVERY metric — the multi-cluster key
+                              # Change this per minikube profile
+
+scrape_configs:
+  # ── Prometheus self-monitoring ──────────────────────────────────────
+  - job_name: prometheus
+    static_configs:
+      - targets: [localhost:9090]   # Prometheus scrapes its own /metrics
+
+  # ── node-exporter via Kubernetes service discovery ─────────────────
+  - job_name: node-exporter
+    kubernetes_sd_configs:
+      - role: pod             # Watch the Kubernetes API for pod changes
+        namespaces:
+          names: [default]    # Only look in the default namespace
+    relabel_configs:
+      # Only scrape pods with label app=node-exporter
+      - source_labels: [__meta_kubernetes_pod_label_app]
+        regex: node-exporter
+        action: keep
+
+      # Set the scrape address to the pod IP + port 9100
+      # node-exporter uses hostNetwork so pod IP == node IP
+      - source_labels: [__meta_kubernetes_pod_ip]
+        replacement: '${1}:9100'
+        target_label: __address__
+
+      # Preserve the node name as a metric label
+      - source_labels: [__meta_kubernetes_pod_node_name]
+        target_label: node
+
+      # Preserve the namespace as a metric label
+      - source_labels: [__meta_kubernetes_namespace]
+        target_label: namespace

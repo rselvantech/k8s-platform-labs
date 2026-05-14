@@ -1,0 +1,106 @@
+# Traefik IngressRoutes — Host-Based Routing with HTTPS
+#
+# Two IngressRoutes per service:
+#   1. HTTP (web entrypoint, port 80)  → https-redirect Middleware → 301 to HTTPS
+#   2. HTTPS (websecure entrypoint, port 443) → backend service
+#
+# The production wildcard certificate (wildcard-rselvantech-prod-tls) is
+# referenced in tls.secretName on HTTPS IngressRoutes.
+# cert-manager created this Secret in the traefik namespace.
+#
+# Equivalent to Demo-06 albc-ingress-tls.yaml but for Traefik instead of ALB.
+# ---
+
+# ---------------------------------------------------------------
+# HTTP Redirect IngressRoute (port 80)
+# One IngressRoute handles all three hosts — redirects all to HTTPS
+# ---------------------------------------------------------------
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: apps-http-redirect
+  namespace: otel-demo
+spec:
+  entryPoints:
+    - web      # port 80 — defined in Traefik Helm values
+  routes:
+    - match: Host(`app.rselvantech.com`) || Host(`grafana.rselvantech.com`) || Host(`jaeger.rselvantech.com`)
+      kind: Rule
+      middlewares:
+        - name: https-redirect
+#          namespace: traefik    # cross-namespace middleware reference
+#          No namespace = same namespace as IngressRoute
+      services:
+        # Services are not used for redirect routes (middleware handles the redirect)
+        # A dummy service is required by Traefik IngressRoute spec validation
+        - name: frontend-proxy
+          port: 8080
+
+---
+# ---------------------------------------------------------------
+# HTTPS IngressRoute — app.rselvantech.com (port 443)
+# ---------------------------------------------------------------
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: frontend-https
+  namespace: otel-demo
+spec:
+  entryPoints:
+    - websecure    # port 443 — defined in Traefik Helm values
+  tls:
+    # cert-manager created this Secret in traefik namespace from certificate-production.yaml
+    # Traefik reads the cert from here to terminate TLS for this host
+    secretName: wildcard-rselvantech-prod-tls
+  routes:
+    - match: Host(`app.rselvantech.com`)
+      kind: Rule
+      services:
+        - name: frontend-proxy
+          port: 8080
+
+---
+# ---------------------------------------------------------------
+# HTTPS IngressRoute — grafana.rselvantech.com (port 443)
+# Grafana root_url is set to https://grafana.rselvantech.com/grafana
+# in otel-demo-app-values.yaml — redirect Location header uses https://
+# ---------------------------------------------------------------
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: grafana-https
+  namespace: otel-demo
+spec:
+  entryPoints:
+    - websecure
+  tls:
+    secretName: wildcard-rselvantech-prod-tls
+  routes:
+    - match: Host(`grafana.rselvantech.com`)
+      kind: Rule
+      services:
+        - name: grafana
+          port: 80
+
+---
+# ---------------------------------------------------------------
+# HTTPS IngressRoute — jaeger.rselvantech.com (port 443)
+# Jaeger serves static HTML on / with client-side JS redirect to /jaeger/ui/search
+# No server-side redirect — works without any config change
+# ---------------------------------------------------------------
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: jaeger-https
+  namespace: otel-demo
+spec:
+  entryPoints:
+    - websecure
+  tls:
+    secretName: wildcard-rselvantech-prod-tls
+  routes:
+    - match: Host(`jaeger.rselvantech.com`)
+      kind: Rule
+      services:
+        - name: jaeger
+          port: 16686

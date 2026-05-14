@@ -1,0 +1,57 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: na-preferred-deploy
+spec:
+  replicas: 10
+  selector:
+    matchLabels:
+      app: na-preferred-app
+  template:
+    metadata:
+      labels:
+        app: na-preferred-app
+    spec:
+      terminationGracePeriodSeconds: 0
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+
+                  # In — storage must be ssd or hdd
+                  - key: storage
+                    operator: In
+                    values:
+                      - ssd
+                      - hdd
+
+                  # NotIn — env must NOT be dev (node anti-affinity)
+                  - key: env
+                    operator: NotIn
+                    values:
+                      - dev
+
+                  # Exists — high-memory key must exist (any value)
+                  - key: high-memory
+                    operator: Exists
+
+                  # DoesNotExist — node must NOT have 'dedicated' key
+                  - key: dedicated
+                    operator: DoesNotExist
+
+                  # Gt — cpu label value must be greater than 4
+                  - key: cpu
+                    operator: Gt
+                    values:
+                      - "4"
+
+                  # Lt — disk label value must be less than 500
+                  - key: disk
+                    operator: Lt
+                    values:
+                      - "500"
+      containers:
+        - name: app
+          image: busybox
+          command: ["sh", "-c", "sleep 3600"]

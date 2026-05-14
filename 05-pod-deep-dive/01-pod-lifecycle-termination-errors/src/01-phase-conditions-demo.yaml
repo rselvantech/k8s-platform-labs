@@ -1,0 +1,10 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: phase-demo
+spec:
+  restartPolicy: Never           # Key: lets pod reach Completed/Error without restart
+  containers:
+    - name: app
+      image: busybox:1.36
+      command: ["sh", "-c", "echo 'App started'; sleep 10; echo 'App done'"]

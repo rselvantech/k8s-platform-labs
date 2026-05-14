@@ -1,0 +1,146 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-dashboard-kubernetes-logs
+  namespace: monitoring
+  labels:
+    app: grafana
+    grafana_dashboard: "1" # Label used by Grafana dashboard provisioner to find this CM
+data:
+  # ── Dashboard provisioner config ──────────────────────────────────────
+  # Tells Grafana where to look for dashboard JSON files.
+  # Mounted at /etc/grafana/provisioning/dashboards/
+  dashboards.yaml: |
+    apiVersion: 1
+    providers:
+      - name: kubernetes-logs
+        orgId: 1
+        folder: Kubernetes
+        type: file
+        disableDeletion: true         # Don't delete if file disappears
+        editable: false               # Read-only in UI — managed by ConfigMap
+        options:
+          path: /var/lib/grafana/dashboards   # Where Grafana looks for JSON files
+
+  # ── Dashboard JSON ────────────────────────────────────────────────────
+  # Custom focused dashboard — panels map directly to what this lab teaches.
+  # LogQL queries inside are explained in the README.
+  kubernetes-logs.json: |
+    {
+      "title": "Kubernetes Logs",
+      "uid": "kubernetes-logs-v1",
+      "schemaVersion": 38,
+      "version": 1,
+      "refresh": "30s",
+      "time": { "from": "now-1h", "to": "now" },
+      "templating": {
+        "list": [
+          {
+            "name": "cluster",
+            "label": "Cluster",
+            "type": "query",
+            "datasource": { "type": "loki", "uid": "loki-datasource" },
+            "query": "label_values(cluster)",
+            "refresh": 2,
+            "sort": 1,
+            "multi": false,
+            "includeAll": false,
+            "description": "Kubernetes cluster — change to switch between minikube profiles"
+          },
+          {
+            "name": "namespace",
+            "label": "Namespace",
+            "type": "query",
+            "datasource": { "type": "loki", "uid": "loki-datasource" },
+            "query": "label_values({cluster=\"$cluster\"}, namespace)",
+            "refresh": 2,
+            "sort": 1,
+            "multi": false,
+            "includeAll": true,
+            "allValue": ".*",
+            "description": "Kubernetes namespace within the selected cluster"
+          },
+          {
+            "name": "pod",
+            "label": "Pod",
+            "type": "query",
+            "datasource": { "type": "loki", "uid": "loki-datasource" },
+            "query": "label_values({cluster=\"$cluster\", namespace=~\"$namespace\"}, pod)",
+            "refresh": 2,
+            "sort": 1,
+            "multi": false,
+            "includeAll": true,
+            "allValue": ".*",
+            "description": "Pod name within the selected namespace"
+          }
+        ]
+      },
+      "panels": [
+        {
+          "id": 1,
+          "title": "Log Volume by Namespace",
+          "description": "Log ingestion rate per namespace — spikes indicate unusual activity",
+          "type": "timeseries",
+          "gridPos": { "h": 8, "w": 24, "x": 0, "y": 0 },
+          "datasource": { "type": "loki", "uid": "loki-datasource" },
+          "targets": [
+            {
+              "expr": "sum by (namespace) (count_over_time({cluster=\"$cluster\"}[$__interval]))",
+              "legendFormat": "{{namespace}}",
+              "refId": "A"
+            }
+          ],
+          "options": {
+            "legend": { "displayMode": "table", "placement": "bottom" }
+          }
+        },
+        {
+          "id": 2,
+          "title": "Log Stream",
+          "description": "Live log lines — filter by cluster, namespace, pod using the dropdowns above",
+          "type": "logs",
+          "gridPos": { "h": 16, "w": 24, "x": 0, "y": 8 },
+          "datasource": { "type": "loki", "uid": "loki-datasource" },
+          "targets": [
+            {
+              "expr": "{cluster=\"$cluster\", namespace=~\"$namespace\", pod=~\"$pod\"}",
+              "refId": "A"
+            }
+          ],
+          "options": {
+            "showTime": true,
+            "showLabels": true,
+            "showCommonLabels": false,
+            "wrapLogMessage": false,
+            "prettifyLogMessage": false,
+            "enableLogDetails": true,
+            "dedupStrategy": "none",
+            "sortOrder": "Descending"
+          }
+        },
+        {
+          "id": 3,
+          "title": "Error Rate by Pod",
+          "description": "Errors per second per pod — 5-minute rate. Spike = pod generating many errors",
+          "type": "timeseries",
+          "gridPos": { "h": 8, "w": 24, "x": 0, "y": 24 },
+          "datasource": { "type": "loki", "uid": "loki-datasource" },
+          "targets": [
+            {
+              "expr": "sum by (pod) (rate({cluster=\"$cluster\", namespace=~\"$namespace\", pod=~\"$pod\"} |~ \"(?i)error\" [5m]))",
+              "legendFormat": "{{pod}}",
+              "refId": "A"
+            }
+          ],
+          "options": {
+            "legend": { "displayMode": "table", "placement": "bottom" }
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "reqps",
+              "custom": { "lineWidth": 2 }
+            }
+          }
+        }
+      ]
+    }

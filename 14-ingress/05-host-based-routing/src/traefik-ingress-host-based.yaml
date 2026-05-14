@@ -1,0 +1,55 @@
+# Traefik Standard Kubernetes Ingress — Host-Based Routing (Alternative)
+#
+# Uses the standard networking.k8s.io/v1 Ingress API instead of Traefik's
+# IngressRoute CRD. Both achieve identical routing behaviour.
+#
+# Use IngressRoute (traefik-ingressroute-host-based.yaml) when you want:
+#   - Per-route middleware (StripPrefix, Auth, RateLimit etc.)
+#   - Explicit priority control
+#   - TCP/UDP routing (not possible with standard Ingress)
+#
+# Use this standard Ingress when you want:
+#   - Controller-agnostic syntax (portable to other ingress controllers)
+#   - Simpler YAML for basic routing
+#
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: host-based-traefik
+  namespace: otel-demo
+  annotations:
+    kubernetes.io/ingress.class: traefik
+spec:
+  rules:
+    - host: app.rselvantech.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: frontend-proxy
+                port:
+                  number: 8080
+
+    - host: grafana.rselvantech.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: grafana
+                port:
+                  number: 80
+
+    - host: jaeger.rselvantech.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: jaeger
+                port:
+                  number: 16686

@@ -1,0 +1,28 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: affinity-preferred-deploy
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: affinity-preferred
+  template:
+    metadata:
+      labels:
+        app: affinity-preferred
+    spec:
+      terminationGracePeriodSeconds: 0
+      affinity:
+        podAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    app: reference
+                topologyKey: kubernetes.io/hostname
+      containers:
+        - name: app
+          image: busybox
+          command: ["sh", "-c", "sleep 3600"]

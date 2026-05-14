@@ -1,0 +1,18 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pod-envfrom
+  namespace: default
+spec:
+  containers:
+  - name: app
+    image: busybox:1.36
+    command: ["sh", "-c", "sleep 3600"]
+    envFrom:
+    # Loads ALL keys from app-config as env vars — 1:1 key → env var name mapping
+    - configMapRef:
+        name: app-config
+      # prefix: "CFG_"   # optional — prepends a string to every key from this source
+      #                     APP_ENV → CFG_APP_ENV, APP_PORT → CFG_APP_PORT, etc.
+      #                     Useful to avoid key collisions when loading multiple ConfigMaps
+  restartPolicy: Never

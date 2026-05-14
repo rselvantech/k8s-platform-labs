@@ -1,0 +1,24 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: demo-failure-policy
+  namespace: lifetime-demo
+spec:
+  backoffLimit: 6
+  podFailurePolicy:
+    rules:
+      - action: Ignore
+        onPodConditions:
+          - type: DisruptionTarget   # Node evictions — do not count against backoffLimit
+      - action: FailJob
+        onExitCodes:
+          containerName: worker
+          operator: In
+          values: [42]              # Exit code 42 = fatal config error — fail immediately
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: worker
+          image: busybox
+          command: ["sh", "-c", "echo 'Fatal config error'; exit 42"]

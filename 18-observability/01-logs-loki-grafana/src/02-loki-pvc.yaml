@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: loki-storage
+  namespace: monitoring
+  labels:
+    app: loki
+spec:
+  # minikube default StorageClass: "standard" — dynamic hostPath provisioning.
+  # AWS EKS production: use storageClassName: gp3 with EBS CSI driver.
+  storageClassName: standard
+  accessModes:
+    - ReadWriteOnce    # Single Loki pod reads/writes — correct for monolithic mode
+  resources:
+    requests:
+      storage: 5Gi
+      # Sizing: daily_log_volume_GB × retention_days × 0.3 (compression ratio)

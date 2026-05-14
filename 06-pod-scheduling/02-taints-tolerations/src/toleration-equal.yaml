@@ -1,0 +1,23 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ssd-app
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: ssd-app
+  template:
+    metadata:
+      labels:
+        app: ssd-app
+    spec:
+      tolerations:
+        - key: "storage"          # Must match taint key
+          operator: "Equal"       # key + value must both match
+          value: "ssd"            # Must match taint value
+          effect: "NoSchedule"    # Must match taint effect exactly
+      containers:
+        - name: app
+          image: busybox
+          command: ["sh", "-c", "sleep 3600"]

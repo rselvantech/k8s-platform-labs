@@ -1,0 +1,51 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: nginx-ds
+  namespace: default
+  labels:
+    app: nginx-ds
+spec:
+
+  # ── Selector ────────────────────────────────────────────────────────
+  selector:
+    matchLabels:
+      app: nginx-ds
+
+  # ── Update Strategy ─────────────────────────────────────────────────
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+
+  # ── Pod Template ────────────────────────────────────────────────────
+  template:
+    metadata:
+      labels:
+        app: nginx-ds        # MUST match spec.selector.matchLabels
+    spec:
+
+      # ── Tolerations ───────────────────────────────────────────────
+      tolerations:
+        - key: node-role.kubernetes.io/control-plane
+          operator: Exists
+          effect: NoSchedule
+
+      # ── Containers ────────────────────────────────────────────────
+      containers:
+        - name: nginx
+          image: nginx:1.27
+          ports:
+            - containerPort: 80
+              protocol: TCP
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "64Mi"
+            limits:
+              cpu: "100m"
+              memory: "128Mi"
+
+  # ── Optional: Pod Lifecycle ─────────────────────────────────────────
+  # minReadySeconds: 0       # Seconds a pod must be ready before counted available
+  # revisionHistoryLimit: 10 # How many ControllerRevisions to keep (default: 10)

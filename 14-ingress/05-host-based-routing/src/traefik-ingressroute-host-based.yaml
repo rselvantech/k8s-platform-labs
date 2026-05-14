@@ -1,0 +1,75 @@
+# Traefik IngressRoute — Host-Based Routing
+#
+# Traefik's native CRD (Custom Resource Definition) for routing.
+# apiVersion: traefik.io/v1alpha1 (Traefik v3.x)
+#
+# The ONLY difference from Demo-04 IngressRoute:
+#   Demo-04: PathPrefix(`/jaeger`)   ← routes by path
+#   Demo-05: Host(`jaeger.rselvantech.com`)  ← routes by hostname
+#
+# No Middleware needed (no StripPrefix) because each service
+# receives requests on its root path just as it expects.
+#
+# DNS is managed by external-dns watching the Traefik Service annotation
+# (set in Step 11 of the README), not these IngressRoute objects.
+#
+---
+# ---------------------------------------------------------------
+# app.rselvantech.com → frontend-proxy:8080
+# ---------------------------------------------------------------
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: frontend-host-route
+  namespace: otel-demo
+spec:
+  entryPoints:
+    - web      # HTTP port 80 entrypoint
+  routes:
+    - match: Host(`app.rselvantech.com`)
+      kind: Rule
+      services:
+        - name: frontend-proxy
+          port: 8080
+
+---
+# ---------------------------------------------------------------
+# grafana.rselvantech.com → grafana:80
+# ---------------------------------------------------------------
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: grafana-host-route
+  namespace: otel-demo
+spec:
+  entryPoints:
+    - web
+  routes:
+    - match: Host(`grafana.rselvantech.com`)
+      kind: Rule
+      services:
+        - name: grafana
+          port: 80
+
+---
+# ---------------------------------------------------------------
+# jaeger.rselvantech.com → jaeger:16686
+#
+# No jaeger-stripprefix Middleware here — compare to Demo-04:
+#   Demo-04 needed: middlewares: [{name: jaeger-stripprefix}]
+#   Demo-05 needs:  nothing — Jaeger receives / and responds correctly
+# ---------------------------------------------------------------
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: jaeger-host-route
+  namespace: otel-demo
+spec:
+  entryPoints:
+    - web
+  routes:
+    - match: Host(`jaeger.rselvantech.com`)
+      kind: Rule
+      services:
+        - name: jaeger
+          port: 16686

@@ -1,0 +1,58 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: jaeger-alb
+  namespace: otel-demo
+  annotations:
+    alb.ingress.kubernetes.io/scheme: internet-facing
+    alb.ingress.kubernetes.io/target-type: ip
+    alb.ingress.kubernetes.io/group.name: multi-service
+    # Rule priority controlled via group.order.Lower number evaluated first. Catch-all / must always have highest order number
+    alb.ingress.kubernetes.io/group.order: "10"
+    alb.ingress.kubernetes.io/healthcheck-path: /jaeger/ui
+
+    # Redirect /jaeger and /jaeger/ → /jaeger/ui/ (browser URL must change)
+    # Key learning: Jaeger React UI needs browser URL = /jaeger/ui/ to match
+    # <base href="/jaeger/ui/"> in HTML. Server-side rewrite won't work.
+    alb.ingress.kubernetes.io/actions.jaeger-redirect: |
+      {
+        "type": "redirect",
+        "redirectConfig": {
+          "path": "/jaeger/ui/",
+          "statusCode": "HTTP_302"
+        }
+      }
+
+spec:
+  ingressClassName: alb
+  rules:
+  - http:
+      paths:
+      # Prefix match /jaeger/ui/* → forward as-is to Jaeger
+      # Handles: UI pages, static assets, API calls
+      - path: /jaeger/ui
+        pathType: Prefix
+        backend:
+          service:
+            name: jaeger
+            port:
+              number: 16686
+
+      # Exact match /jaeger and /jaeger/ → redirect to /jaeger/ui/
+      - path: /jaeger
+        pathType: Exact
+        backend:
+          service:
+            name: jaeger-redirect
+            port:
+              name: use-annotation
+
+      - path: /jaeger/
+        pathType: Exact
+        backend:
+          service:
+            name: jaeger-redirect
+            port:
+              name: use-annotation
+
+

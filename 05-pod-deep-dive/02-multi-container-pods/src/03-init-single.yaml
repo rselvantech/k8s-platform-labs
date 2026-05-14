@@ -1,0 +1,24 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: webapp-with-init
+spec:
+  initContainers:
+    - name: wait-for-postgres        # Init container — waits for DB Service
+      image: busybox:1.36
+      command:
+        - sh
+        - -c
+        - |
+          echo "Checking if PostgreSQL service is available..."
+          until nslookup postgres-svc.default.svc.cluster.local; do
+            echo "Waiting for postgres-svc DNS resolution... retrying in 3s"
+            sleep 3
+          done
+          echo "PostgreSQL service found! Starting main application."
+
+  containers:
+    - name: webapp                   # Main container — starts ONLY after init passes
+      image: nginx:1.27
+      ports:
+        - containerPort: 80

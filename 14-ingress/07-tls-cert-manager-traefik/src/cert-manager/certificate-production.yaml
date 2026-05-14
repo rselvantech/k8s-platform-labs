@@ -1,0 +1,29 @@
+# Production Wildcard Certificate
+#
+# Browser-trusted certificate from Let's Encrypt.
+# Only apply after staging certificate is READY = True.
+#
+# This is the certificate Traefik uses for HTTPS in production.
+# cert-manager auto-renews it ~30 days before expiry.
+# ---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: wildcard-rselvantech-prod
+#  namespace: traefik    # must be same namespace as Traefik
+  namespace: otel-demo   # ← IngressRoutes are here
+spec:
+  # Secret name referenced in Traefik IngressRoute tls.secretName
+  secretName: wildcard-rselvantech-prod-tls
+
+  issuerRef:
+    name: letsencrypt-production
+    kind: ClusterIssuer
+    group: cert-manager.io
+
+  dnsNames:
+    - "*.rselvantech.com"
+    - "rselvantech.com"
+
+  duration: 2160h       # 90 days (Let's Encrypt maximum)
+  renewBefore: 720h     # renew 30 days before expiry

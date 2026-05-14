@@ -1,0 +1,24 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: frontend-alb
+  namespace: otel-demo
+  annotations:
+    alb.ingress.kubernetes.io/scheme: internet-facing
+    alb.ingress.kubernetes.io/target-type: ip
+    alb.ingress.kubernetes.io/group.name: multi-service  # Share same ALB
+    # Rule priority controlled via group.order.Lower number evaluated first. Catch-all / must always have highest order number
+    alb.ingress.kubernetes.io/group.order: "100"
+    alb.ingress.kubernetes.io/healthcheck-path: /
+spec:
+  ingressClassName: alb
+  rules:
+  - http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: frontend-proxy
+            port:
+              number: 8080

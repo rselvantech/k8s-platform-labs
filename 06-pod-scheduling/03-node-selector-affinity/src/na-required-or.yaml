@@ -1,0 +1,29 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: na-required-deploy
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: na-required-app
+  template:
+    metadata:
+      labels:
+        app: na-required-app
+    spec:
+      terminationGracePeriodSeconds: 0
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: storage
+                    operator: In
+                    values:
+                      - ssd    # OR
+                      - hdd    # OR
+      containers:
+        - name: app
+          image: busybox
+          command: ["sh", "-c", "sleep 3600"]

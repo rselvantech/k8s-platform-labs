@@ -1,0 +1,114 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: prometheus
+  namespace: monitoring
+  labels:
+    app: prometheus
+    version: "3.10.0"
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: prometheus
+  template:
+    metadata:
+      labels:
+        app: prometheus
+      annotations:
+        # Tell Prometheus to scrape its own pod
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9090"
+    spec:
+      serviceAccountName: prometheus # RBAC from 01-prometheus-rbac.yaml
+
+      securityContext:
+        fsGroup: 65534 # nobody GID — Prometheus runs as nobody by default
+        runAsUser: 65534
+        runAsGroup: 65534
+        runAsNonRoot: true
+
+      containers:
+        - name: prometheus
+          image: prom/prometheus:v3.10.0
+          args:
+            - --config.file=/etc/prometheus/prometheus.yml
+            - --storage.tsdb.path=/prometheus # TSDB data stored on PVC
+            - --storage.tsdb.retention.time=15d # Keep 15 days of metrics
+            - --storage.tsdb.retention.size=8GB # Cap at 8GB (leaves 2GB headroom on 10Gi PVC)
+            - --web.enable-lifecycle # Allow POST /-/reload to reload config
+            - --web.console.libraries=/usr/share/prometheus/console_libraries
+            - --web.console.templates=/usr/share/prometheus/consoles
+
+          ports:
+            - name: http
+              containerPort: 9090
+
+          readinessProbe:
+            httpGet:
+              path: /-/ready
+              port: 9090
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            failureThreshold: 3
+
+          livenessProbe:
+            httpGet:
+              path: /-/healthy
+              port: 9090
+            initialDelaySeconds: 60
+            periodSeconds: 30
+            failureThreshold: 5
+
+          resources:
+            requests:
+              cpu: "200m"
+              memory: "512Mi"
+            limits:
+              cpu: "1000m"
+              memory: "1Gi"
+            # Production sizing:
+            #   Prometheus memory scales with number of active time series
+            #   ~1.5 bytes per sample in memory (WAL)
+            #   10,000 series × 15s scrape = ~2MB/s ingestion
+            #   Rule of thumb: 2GB RAM per 1M active time series
+
+          volumeMounts:
+            - name: config
+              mountPath: /etc/prometheus/prometheus.yml
+              subPath: prometheus.yml # Mount only the config key
+            - name: storage
+              mountPath: /prometheus # TSDB data directory (PVC)
+
+      volumes:
+        - name: config
+          configMap:
+            name: prometheus-config
+        - name: storage
+          persistentVolumeClaim:
+            claimName: prometheus-storage
+
+---
+# ClusterIP Service — Grafana queries Prometheus via this DNS name:
+#   http://prometheus.monitoring.svc.cluster.local:9090
+# The Grafana datasource uses access: proxy — Grafana backend calls Prometheus.
+# NodePort is not needed for Grafana integration, but you can add one for
+# direct browser access to the Prometheus UI during debugging:
+#   type: NodePort
+#   nodePort: 30090
+apiVersion: v1
+kind: Service
+metadata:
+  name: prometheus
+  namespace: monitoring
+  labels:
+    app: prometheus
+spec:
+  type: ClusterIP
+  selector:
+    app: prometheus
+  ports:
+    - name: http
+      port: 9090
+      targetPort: 9090

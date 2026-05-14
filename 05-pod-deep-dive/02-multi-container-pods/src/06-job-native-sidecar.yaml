@@ -1,0 +1,39 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: job-native-sidecar
+spec:
+  template:
+    spec:
+      restartPolicy: Never
+
+      initContainers:
+        - name: sidecar              # Native sidecar — moved to initContainers[]
+          image: busybox:1.36
+          restartPolicy: Always      # ← This single field makes it a native sidecar
+                                     #   Starts BEFORE main container
+                                     #   Terminates AFTER main container exits
+                                     #   Restarts independently if it crashes
+          command:
+            - sh
+            - -c
+            - |
+              trap 'echo "[sidecar] ■ STOPPED  at $(date +%T)"; exit 0' TERM
+              echo "[sidecar] ▶ STARTED  at $(date +%T)"
+              while true; do
+                echo "[sidecar] ● RUNNING  at $(date +%T)"
+                sleep 3
+              done
+
+      containers:
+        - name: main-job             # Identical to Step 12 — no changes at all
+          image: busybox:1.36
+          command:
+            - sh
+            - -c
+            - |
+              echo "[main]    ▶ STARTED  at $(date +%T)"
+              echo "[main]    ● RUNNING  - processing work..."
+              sleep 10
+              echo "[main]    ■ FINISHED at $(date +%T) — exiting 0"
+              exit 0

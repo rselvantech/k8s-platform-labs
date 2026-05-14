@@ -1,0 +1,33 @@
+apiVersion: eksctl.io/v1alpha5
+kind: ClusterConfig
+metadata:
+  name: ${CLUSTER_NAME}
+  region: ${AWS_REGION}
+  version: "1.33"
+
+iam:
+  withOIDC: true
+
+managedNodeGroups:
+  - name: ${CLUSTER_NAME}
+    instanceType: t3.small
+    desiredCapacity: 5
+    minSize: 3
+    maxSize: 7
+    volumeSize: 30
+
+# CRITICAL: Enable prefix delegation to support 110 pods/node (vs 11 without it)
+addons:
+  - name: vpc-cni
+    version: latest
+    configurationValues: '{"env":{"ENABLE_PREFIX_DELEGATION":"true"}}'
+    resolveConflicts: overwrite
+
+accessConfig:
+  authenticationMode: API_AND_CONFIG_MAP
+  accessEntries:
+    - principalARN: ${CONSOLE_USER_ARN}
+      accessPolicies:
+        - policyARN: arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy
+          accessScope:
+            type: cluster

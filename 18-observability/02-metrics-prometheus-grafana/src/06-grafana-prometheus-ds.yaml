@@ -1,0 +1,39 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-datasources
+  namespace: monitoring
+  labels:
+    app: grafana
+data:
+  # Replaces the Lab 01 version — adds Prometheus alongside Loki.
+  # After applying: kubectl rollout restart deployment/grafana -n monitoring
+  datasources.yaml: |
+    apiVersion: 1
+    datasources:
+      # ── Loki (from Lab 01 — unchanged) ─────────────────────────────
+      - name: Loki
+        type: loki
+        uid: loki-datasource
+        access: proxy
+        url: http://loki.monitoring.svc.cluster.local:3100
+        isDefault: true
+        version: 1
+        editable: false
+        jsonData:
+          maxLines: 1000
+
+      # ── Prometheus (added in this lab) ──────────────────────────────
+      - name: Prometheus
+        type: prometheus
+        uid: prometheus-datasource   # Stable UID referenced by dashboard JSON
+        access: proxy
+        # proxy: Grafana backend calls Prometheus — browser never contacts it
+        url: http://prometheus.monitoring.svc.cluster.local:9090
+        isDefault: false             # Loki remains default for Explore
+        version: 1
+        editable: false
+        jsonData:
+          timeInterval: 15s          # Matches Prometheus scrape_interval
+          queryTimeout: 60s
+          httpMethod: POST           # POST supports longer queries than GET

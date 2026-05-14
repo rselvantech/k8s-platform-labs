@@ -1,0 +1,23 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: storage-deploy
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: storage-app
+  template:
+    metadata:
+      labels:
+        app: storage-app
+    spec:
+      tolerations:
+        - key: "storage"
+          operator: "Exists"    # Matches storage=ssd AND storage=hdd
+          effect: "NoSchedule"
+          # ⚠️ No 'value:' field — required when using Exists operator
+      containers:
+        - name: app
+          image: busybox
+          command: ["sh", "-c", "sleep 3600"]

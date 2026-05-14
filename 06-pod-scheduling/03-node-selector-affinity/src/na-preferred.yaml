@@ -1,0 +1,36 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: na-preferred-deploy
+spec:
+  replicas: 10
+  selector:
+    matchLabels:
+      app: na-preferred-app
+  template:
+    metadata:
+      labels:
+        app: na-preferred-app
+    spec:
+      terminationGracePeriodSeconds: 0
+      affinity:
+        nodeAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 10              # Higher preference → ssd node
+              preference:
+                matchExpressions:
+                  - key: storage
+                    operator: In
+                    values:
+                      - ssd
+            - weight: 5               # Lower preference → hdd node
+              preference:
+                matchExpressions:
+                  - key: storage
+                    operator: In
+                    values:
+                      - hdd
+      containers:
+        - name: app
+          image: busybox
+          command: ["sh", "-c", "sleep 3600"]

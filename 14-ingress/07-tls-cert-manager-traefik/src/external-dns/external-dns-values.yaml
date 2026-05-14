@@ -1,0 +1,44 @@
+# external-dns Helm values
+# Chart: external-dns/external-dns  version: 1.20.0
+# Docs: https://kubernetes-sigs.github.io/external-dns/
+# ---
+
+# DNS provider — AWS Route53
+provider:
+  name: aws
+
+# AWS region for Route53 API calls
+# Route53 is global but the API client requires a region
+env:
+  - name: AWS_DEFAULT_REGION
+    value: us-east-2   # replace with your cluster region
+
+# Sources: watch Service annotations for hostname discovery
+# For Traefik: external-dns reads hostname from annotated Service
+# (not IngressRoute — CRD has no .status.loadBalancer field)
+sources:
+  - service
+
+# Sync policy: sync = create AND delete records automatically
+# Records are deleted when the Service annotation or Service itself is removed
+policy: sync
+
+# Ownership: txt = external-dns manages only records it created (tracks via TXT records)
+# Prevents external-dns from modifying records it did not create
+registry: txt
+txtOwnerId: external-dns
+
+# Domain filter — only manage records for this domain
+# Prevents external-dns from accidentally modifying other hosted zones
+domainFilters:
+  - rselvantech.com
+
+# Use IRSA (IAM Roles for Service Accounts) for Route53 access
+# serviceAccount must match the one created by eksctl
+serviceAccount:
+  create: false
+  name: external-dns   # must match: eksctl create iamserviceaccount --name external-dns
+
+# Log level for debugging
+logLevel: info
+logFormat: text

@@ -1,0 +1,9 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: error-imagepull-demo
+spec:
+  restartPolicy: Never
+  containers:
+    - name: app
+      image: busybox:99.99.99      # This version does not exist on Docker Hub

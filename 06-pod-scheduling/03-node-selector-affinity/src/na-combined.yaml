@@ -1,0 +1,43 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: db-deploy
+spec:
+  replicas: 6
+  selector:
+    matchLabels:
+      app: db
+  template:
+    metadata:
+      labels:
+        app: db
+    spec:
+      terminationGracePeriodSeconds: 0
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:    # HARD: storage nodes only
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: node-role
+                    operator: In
+                    values:
+                      - storage
+          preferredDuringSchedulingIgnoredDuringExecution:   # SOFT: SSD over HDD
+            - weight: 10
+              preference:
+                matchExpressions:
+                  - key: storage
+                    operator: In
+                    values:
+                      - ssd
+            - weight: 5
+              preference:
+                matchExpressions:
+                  - key: storage
+                    operator: In
+                    values:
+                      - hdd
+      containers:
+        - name: db
+          image: busybox
+          command: ["sh", "-c", "sleep 3600"]

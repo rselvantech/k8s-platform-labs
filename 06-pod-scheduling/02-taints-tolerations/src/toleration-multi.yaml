@@ -1,0 +1,26 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: prod-storage-deploy
+spec:
+  replicas: 5
+  selector:
+    matchLabels:
+      app: prod-storage-app
+  template:
+    metadata:
+      labels:
+        app: prod-storage-app
+    spec:
+      tolerations:
+        - key: "storage"         # Toleration 1: any storage type
+          operator: "Exists"
+          effect: "NoSchedule"
+        - key: "env"             # Toleration 2: must be production
+          operator: "Equal"
+          value: "production"
+          effect: "NoSchedule"
+      containers:
+        - name: app
+          image: busybox
+          command: ["sh", "-c", "sleep 3600"]

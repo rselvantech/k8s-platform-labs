@@ -1,0 +1,10 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres-svc                 # The name the init container looks for
+spec:
+  selector:
+    app: postgres                    # No actual postgres pod needed for DNS demo
+  ports:
+    - port: 5432
+      targetPort: 5432

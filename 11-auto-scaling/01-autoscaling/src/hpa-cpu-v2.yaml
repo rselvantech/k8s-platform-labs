@@ -1,0 +1,18 @@
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: nginx-hpa-cpu
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1       # must match the deployment's apiVersion
+    kind: Deployment
+    name: nginx-deploy        # must match the deployment name exactly
+  minReplicas: 1
+  maxReplicas: 5
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 50   # scale out when average CPU > 50%

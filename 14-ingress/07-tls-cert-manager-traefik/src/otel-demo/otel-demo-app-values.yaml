@@ -1,0 +1,242 @@
+# OpenTelemetry Demo - Minimal Configuration for Ingress Learning
+# This configuration enables only essential services needed for Kubernetes Ingress scenarios
+# Tested with: open-telemetry/opentelemetry-demo chart version 0.40.2 (app version 2.2.0)
+
+default:
+  envOverrides: []
+
+# OpenSearch - DISABLED (OOM on t3.small nodes, not needed for Ingress learning)
+# Jaeger falls back to in-memory trace storage when opensearch is disabled
+# Impact: APM Dashboard log panels won't work. Traces and metrics dashboards work fine.
+# Full observability with opensearch can be enabled later with larger infra or fewer services.
+opensearch:
+  enabled: false
+
+# ========================================
+# APPLICATION COMPONENTS
+# ========================================
+
+components:
+  # Frontend - Main web UI (ESSENTIAL)
+  frontend:
+    enabled: true
+    useDefault:
+      env: true
+
+  # Frontend Proxy - Envoy proxy (ESSENTIAL)
+  frontend-proxy:
+    enabled: true
+    useDefault:
+      env: true
+
+  # Product Catalog - gRPC service for product listings (ESSENTIAL for gRPC routing)
+  product-catalog:
+    enabled: true
+    useDefault:
+      env: true
+
+  # Cart Service - Shopping cart (ESSENTIAL for multi-service routing)
+  cart:
+    enabled: true
+    useDefault:
+      env: true
+
+  # Checkout Service - Order processing (ESSENTIAL for service orchestration)
+  # NOTE: Kafka dependency removed via initContainers override and KAFKA_ADDR env
+  checkout:
+    enabled: true
+    useDefault:
+      env: true
+    # Wipes out the 'wait-for-kafka' init container
+    initContainers: []
+    env:
+      - name: KAFKA_ADDR
+        value: ""            # Prevents the application from trying to connect to kafka
+      - name: CHECKOUT_PORT  # Since we override env above, we must explicitly set all other env values
+        value: "8080"
+      - name: CART_ADDR
+        value: cart:8080
+      - name: CURRENCY_ADDR
+        value: currency:8080
+      - name: EMAIL_ADDR
+        value: http://email:8080
+      - name: PAYMENT_ADDR
+        value: payment:8080
+      - name: PRODUCT_CATALOG_ADDR
+        value: product-catalog:8080
+      - name: SHIPPING_ADDR
+        value: http://shipping:8080
+      - name: FLAGD_HOST
+        value: flagd
+      - name: FLAGD_PORT
+        value: "8013"
+      - name: OTEL_EXPORTER_OTLP_ENDPOINT
+        value: http://$(OTEL_COLLECTOR_NAME):4317
+      - name: GOMEMLIMIT
+        value: 16MiB
+
+  # Recommendation Service - Product recommendations
+  recommendation:
+    enabled: true
+    useDefault:
+      env: true
+
+  # Payment Service - Payment processing
+  payment:
+    enabled: true
+    useDefault:
+      env: true
+
+  # Currency Service - Currency conversion
+  currency:
+    enabled: true
+    useDefault:
+      env: true
+
+  # Shipping Service - Needed for checkout
+  shipping:
+    enabled: true
+    useDefault:
+      env: true
+
+  # Email Service - Needed for checkout
+  email:
+    enabled: true
+    useDefault:
+      env: true
+
+  # Quote Service - Needed for checkout
+  quote:
+    enabled: true
+    useDefault:
+      env: true
+
+  # PostgreSQL - Database (needed for product-catalog)
+  postgresql:
+    enabled: true
+    useDefault:
+      env: true
+
+  # ========================================
+  # SERVICES DISABLED (NOT NEEDED FOR INGRESS LEARNING)
+  # ========================================
+
+  # Product Reviews - Only adds review section in UI, not needed for core shopping flow
+  product-reviews:
+    enabled: false
+    useDefault:
+      env: true
+
+  # LLM - Only used by product-reviews
+  llm:
+    enabled: false
+    useDefault:
+      env: true
+
+  # Ad Service - Not needed for Ingress learning
+  ad:
+    enabled: false
+    useDefault:
+      env: true
+
+  # Accounting Service - Requires kafka, not user-facing
+  accounting:
+    enabled: false
+    useDefault:
+      env: true
+
+  # Fraud Detection Service - Requires kafka, not needed
+  fraud-detection:
+    enabled: false
+    useDefault:
+      env: true
+
+  # Flagd - Feature flags (optional, not needed for Ingress learning)
+  flagd:
+    enabled: false
+    useDefault:
+      env: true
+
+  # ========================================
+  # INFRASTRUCTURE COMPONENTS
+  # ========================================
+
+  # Load Generator - Simulates realistic user traffic
+  load-generator:
+    enabled: true
+    resources:
+      requests:
+        cpu: "100m"
+        memory: "120Mi"
+      limits:
+        cpu: "300m"
+        memory: "300Mi"                         # Down from default 1500Mi
+
+  # Valkey - Redis-compatible cache, required by cart service
+  valkey-cart:
+    enabled: true
+    useDefault:
+      env: false
+
+  # Image Provider - Static image server (needed to show product images)
+  image-provider:
+    enabled: true
+    useDefault:
+      env: true
+
+  # Kafka - DISABLED
+  # Accounting and fraud-detection services are disabled, so kafka is not needed.
+  # Checkout service is patched above to work without kafka.
+  kafka:
+    enabled: false
+    useDefault:
+      env: true
+
+# ========================================
+# OBSERVABILITY COMPONENTS
+# (enabled by default in the Helm chart, explicitly documented here for clarity)
+# ========================================
+
+# Jaeger - Distributed tracing UI
+# Falls back to in-memory storage when opensearch is disabled
+jaeger:
+  enabled: true
+
+# Grafana - Metrics and trace dashboards
+# 8 pre-configured dashboards shipped with the chart
+# Access URL: http://localhost:3000/grafana/ (note the sub-path)
+# No login required - anonymous access enabled
+
+
+# Changes from default values:
+#   - Grafana root_url set to https:// for TLS demos (Demo-06, Demo-07)
+#   - serve_from_sub_path enables Grafana to serve under /grafana path
+# ---
+
+grafana:
+  enabled: true
+  grafana.ini:
+    server:
+      # domain: used by Grafana to generate absolute URLs
+      domain: grafana.rselvantech.com
+
+      # root_url: must match the protocol and domain the browser uses to reach Grafana
+      # - Demo-05 (HTTP):  "http://grafana.rselvantech.com/grafana"
+      # - Demo-06/07 (HTTPS): "https://grafana.rselvantech.com/grafana"  ← current
+      root_url: "https://grafana.rselvantech.com/grafana"
+
+      # serve_from_sub_path: required when Grafana is served under a path (/grafana)
+      # rather than the root (/) — Grafana rewrites asset paths accordingly
+      serve_from_sub_path: true
+
+# Prometheus - Metrics collection and storage
+prometheus:
+  enabled: true
+
+#Field name changed from `otelCollector` to `opentelemetryCollector`
+#**Remove this entire block** - the collector is enabled by default and doesn't need explicit config in the values file
+
+# OpenTelemetry Collector - Runs as DaemonSet (1 agent per node)
+# Collects traces and metrics from all app services
+# opentelemetry-collector:
+#   enabled: true

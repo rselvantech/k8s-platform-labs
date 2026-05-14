@@ -1,0 +1,8 @@
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: high-non-preempting
+value: 50000
+globalDefault: false
+preemptionPolicy: Never
+description: "High priority but will not preempt running pods."

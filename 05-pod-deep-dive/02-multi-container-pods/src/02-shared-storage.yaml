@@ -1,0 +1,39 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: shared-storage-demo
+spec:
+  restartPolicy: Never
+  containers:
+    - name: nginx                 # Main container — writes access logs
+      image: nginx:1.27
+      volumeMounts:
+        - name: nginx-logs
+          mountPath: /var/log/nginx     # nginx writes access.log here
+          # No readOnly: false is the default — can read AND write
+
+    - name: log-reader            # Helper container — reads logs (ReadOnly)
+      image: busybox:1.36
+      command:
+        - sh
+        - -c
+        - |
+          echo "Waiting for nginx logs to appear..."
+          sleep 3
+          echo "--- Contents of shared log volume ---"
+          ls -la /logs/
+          echo ""
+          echo "--- Reading nginx access log (ReadOnly mount) ---"
+          cat /logs/access.log 2>/dev/null || echo "No requests yet"
+          echo ""
+          echo "--- Attempting to write to ReadOnly volume ---"
+          echo "test" >> /logs/access.log 2>&1 || echo "Write BLOCKED (ReadOnly — expected!)"
+          sleep 3600
+      volumeMounts:
+        - name: nginx-logs
+          mountPath: /logs         # Different path, same underlying volume
+          readOnly: true           # Helper can only read — not write
+
+  volumes:
+    - name: nginx-logs             # Volume declared at POD level
+      emptyDir: {}                 # Ephemeral volume — lives for pod lifetime

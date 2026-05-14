@@ -1,0 +1,37 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: microservice-with-inits
+spec:
+  initContainers:
+    - name: check-external-api          # Init #1: verify outbound HTTP connectivity
+      image: busybox:1.36
+      command:
+        - sh
+        - -c
+        - |
+          echo "Init 1: Checking outbound HTTP connectivity..."
+          until wget -q --spider http://info.cern.ch; do
+            echo "Not reachable. Retrying in 5s..."
+            sleep 5
+          done
+          echo "Init 1: External HTTP reachable. Proceeding to Init 2."
+
+    - name: check-internal-svc          # Init #2: runs ONLY after Init #1 exits 0
+      image: busybox:1.36
+      command:
+        - sh
+        - -c
+        - |
+          echo "Init 2: Waiting for api-svc to be created..."
+          until nslookup api-svc.default.svc.cluster.local; do
+            echo "api-svc not found. Retrying in 3s..."
+            sleep 3
+          done
+          echo "Init 2: api-svc found. Starting main application."
+
+  containers:
+    - name: microservice                # Starts ONLY after BOTH inits exit 0
+      image: nginx:1.27
+      ports:
+        - containerPort: 80

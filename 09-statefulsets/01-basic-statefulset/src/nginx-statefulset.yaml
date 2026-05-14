@@ -1,0 +1,105 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: web               # StatefulSet name. Pod names derive from this:
+                          # web-0, web-1, web-2
+  namespace: default
+  labels:
+    app: nginx
+spec:
+
+  # ── Service binding ───────────────────────────────────────────────────
+  serviceName: nginx      # REQUIRED. Must match the Headless Service name.
+                          # The controller uses this to construct per-pod DNS:
+                          # web-0.nginx.default.svc.cluster.local
+
+  # ── Replica count ─────────────────────────────────────────────────────
+  replicas: 3             # Pods created in order: web-0 → web-1 → web-2
+                          # Each waits for previous to be Running + Ready
+                          # before the next is created.
+
+  # ── Selector ─────────────────────────────────────────────────────────
+  selector:
+    matchLabels:
+      app: nginx          # Must match template.metadata.labels exactly.
+                          # Immutable after creation.
+
+  # ── Pod Management Policy ─────────────────────────────────────────────
+  podManagementPolicy: OrderedReady
+  # OrderedReady (default):
+  #   Start: web-0 must be Ready before web-1 starts, web-1 before web-2
+  #   Stop:  web-2 terminated before web-1, web-1 before web-0
+  #   Use for: databases, distributed systems with leader election
+  #
+  # Parallel:
+  #   Start: all pods created simultaneously — no ordering enforced
+  #   Stop:  all pods terminated simultaneously
+  #   Use for: stateless-like stateful apps where startup order doesn't matter
+  #   Example: a distributed cache where any node can join at any time
+
+  # ── Update Strategy ──────────────────────────────────────────────────
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      partition: 0
+      # partition: N means only pods with ordinal >= N are updated.
+      # partition: 0 = update all pods (default behaviour).
+      # partition: 2 = only web-2 is updated; web-0 and web-1 keep old version.
+      # Used for canary updates on StatefulSets — see Lab 03.
+  # type: OnDelete = pods only updated when manually deleted (like DaemonSet)
+
+  # ── Revision History ─────────────────────────────────────────────────
+  revisionHistoryLimit: 10
+  # Number of ControllerRevision objects to keep for rollback.
+  # Same mechanism as DaemonSet (not ReplicaSets like Deployment).
+
+  # ── Pod Template ─────────────────────────────────────────────────────
+  template:
+    metadata:
+      labels:
+        app: nginx        # Must match spec.selector.matchLabels
+    spec:
+      # terminationGracePeriodSeconds: 10 (default: 30)
+      # For databases: set high enough for in-flight transactions to complete.
+      # For this lab: 10s is fine for nginx.
+      terminationGracePeriodSeconds: 10
+
+      containers:
+        - name: nginx
+          image: nginx:1.27
+
+          ports:
+            - name: http
+              containerPort: 80
+
+          # readinessProbe: critical for StatefulSet ordered startup.
+          # The controller uses readiness to gate the next pod's creation.
+          # Without a probe, Kubernetes considers the pod Ready immediately
+          # after the container starts — which may be before nginx is serving.
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 80
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            failureThreshold: 3
+
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "64Mi"
+            limits:
+              cpu: "100m"
+              memory: "128Mi"
+
+  # ── Volume Claim Templates ────────────────────────────────────────────
+  # Not used in this lab — added in Lab 02 (StatefulSet with Persistent Storage).
+  # volumeClaimTemplates:
+  #   - metadata:
+  #       name: data
+  #     spec:
+  #       accessModes: [ReadWriteOnce]
+  #       storageClassName: standard
+  #       resources:
+  #         requests:
+  #           storage: 1Gi

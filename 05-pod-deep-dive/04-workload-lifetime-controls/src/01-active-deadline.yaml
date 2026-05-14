@@ -1,0 +1,15 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: demo-active-deadline
+  namespace: lifetime-demo
+spec:
+  activeDeadlineSeconds: 15       # Hard ceiling — kill after 15 seconds
+  backoffLimit: 10                # 10 retries allowed — deadline will win
+  template:
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: worker
+          image: busybox
+          command: ["sh", "-c", "echo 'Starting...'; sleep 120"]

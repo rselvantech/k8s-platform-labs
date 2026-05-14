@@ -1,0 +1,101 @@
+# ALB Host-Based Routing Ingress
+#
+# Routes by Host header — no path rewriting needed.
+# Each service serves on its own subdomain, responding at /
+# just as it was designed to.
+#
+# external-dns watches this Ingress and auto-creates Route53 records:
+#   app.rselvantech.com     ALIAS → ALB
+#   grafana.rselvantech.com ALIAS → ALB
+#   jaeger.rselvantech.com  ALIAS → ALB
+#
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: host-based-alb
+  namespace: otel-demo
+  annotations:
+    # ------------------------------------------------------------------
+    # ALB Controller annotations
+    # ------------------------------------------------------------------
+
+    # Use AWS Load Balancer Controller (not legacy in-tree controller)
+    # kubernetes.io/ingress.class: alb  >>>>>>Deprecated. use 'spec.ingressClassName`<<<<<<<<<<<<<
+
+    # internet-facing = public ALB
+    alb.ingress.kubernetes.io/scheme: internet-facing
+
+    # ip = routes directly to pod IPs (requires AWS VPC CNI)
+    alb.ingress.kubernetes.io/target-type: ip
+
+    # Shares ALB with other Ingresses in this group
+    alb.ingress.kubernetes.io/group.name: host-routing
+
+    # Health check — all 3 services respond healthy on /
+    # (no per-service health check difference, unlike path-based Demo-04)
+    alb.ingress.kubernetes.io/healthcheck-protocol: HTTP
+    alb.ingress.kubernetes.io/healthcheck-path: /
+    alb.ingress.kubernetes.io/healthcheck-interval-seconds: "30"
+    alb.ingress.kubernetes.io/success-codes: "200-399"
+
+    # ------------------------------------------------------------------
+    # external-dns annotation
+    # Tells external-dns which Route53 records to create for this Ingress
+    # external-dns reads .status.loadBalancer.ingress[0].hostname
+    # and creates ALIAS records pointing to the ALB
+    # ------------------------------------------------------------------
+    external-dns.alpha.kubernetes.io/hostname: >-
+      app.rselvantech.com,grafana.rselvantech.com,jaeger.rselvantech.com
+
+spec:
+  ingressClassName: alb
+  rules:
+    # ---------------------------------------------------------------
+    # app.rselvantech.com → OTel Demo frontend-proxy
+    # frontend-proxy is the Envoy gateway for the entire OTel demo store
+    # ---------------------------------------------------------------
+    - host: app.rselvantech.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: frontend-proxy
+                port:
+                  number: 8080
+
+    # ---------------------------------------------------------------
+    # grafana.rselvantech.com → Grafana
+    # Grafana is configured with root_url: /grafana in the OTel demo.
+    # With path-based routing (Demo-04) it served on /grafana.
+    # With host-based routing it still serves on /grafana — the subdomain
+    # just provides a cleaner entry point.
+    # ---------------------------------------------------------------
+    - host: grafana.rselvantech.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: grafana
+                port:
+                  number: 80
+
+    # ---------------------------------------------------------------
+    # jaeger.rselvantech.com → Jaeger UI
+    # In Demo-04 (path-based) Jaeger needed StripPrefix/RewriteConfig
+    # because it served on / but was accessed at /jaeger.
+    # Here it still serves on / and is accessed at / — no rewriting.
+    # ---------------------------------------------------------------
+    - host: jaeger.rselvantech.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: jaeger
+                port:
+                  number: 16686

@@ -1,0 +1,12 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: gated-pod
+spec:
+  terminationGracePeriodSeconds: 0
+  schedulingGates:
+    - name: example.com/disk-provisioned
+  containers:
+    - name: app
+      image: busybox
+      command: ["sh", "-c", "sleep 3600"]

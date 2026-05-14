@@ -1,0 +1,31 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pod-valuefrom
+  namespace: default
+spec:
+  containers:
+  - name: app
+    image: busybox:1.36
+    command: ["sh", "-c", "sleep 3600"]
+    env:
+    # name: env var name INSIDE the container (can differ from the ConfigMap key)
+    # configMapKeyRef.name: which ConfigMap to read from
+    # configMapKeyRef.key:  which key inside that ConfigMap
+    - name: PORT                       # container sees $PORT
+      valueFrom:
+        configMapKeyRef:
+          name: app-config
+          key: APP_PORT                # APP_PORT (ConfigMap) → PORT (container)
+    - name: LOG_LEVEL
+      valueFrom:
+        configMapKeyRef:
+          name: app-config
+          key: APP_LOG_LEVEL           # APP_LOG_LEVEL → LOG_LEVEL
+    - name: VERSION
+      valueFrom:
+        configMapKeyRef:
+          name: release-config         # different ConfigMap — fully valid in one env list
+          key: RELEASE_VERSION
+          # optional: true             # see behaviour table below
+  restartPolicy: Never

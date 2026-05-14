@@ -1,0 +1,46 @@
+# external-dns Helm values
+# Chart: external-dns/external-dns  version: 1.20.0  appVersion: v0.19.0
+# Ref: https://kubernetes-sigs.github.io/external-dns/latest/docs/tutorials/aws/
+
+# Provider — note: legacy `provider: aws` is deprecated since chart 1.13+
+provider:
+  name: aws
+
+# Watch both Service and Ingress resources for DNS annotations
+sources:
+  - service
+  - ingress
+
+# Only manage records under rselvantech.com
+# Prevents accidental changes to any other zone
+domainFilters:
+  - rselvantech.com
+
+# sync = create, update AND delete records when Ingress/Service is removed
+# upsert-only = never delete (safer but leaves stale records after cleanup)
+policy: sync
+
+# txt = create TXT ownership records alongside each A record
+# This lets external-dns know which records it owns vs records created manually
+registry: txt
+txtOwnerId: external-dns-rselvantech
+
+# Only manage public hosted zones (not private/internal zones)
+extraArgs:
+  aws-zone-type: public
+
+# ServiceAccount was created by eksctl create iamserviceaccount
+# Do NOT let Helm create a new one — use the existing annotated one
+serviceAccount:
+  create: false
+  name: external-dns
+
+logLevel: info
+logFormat: text
+
+# Sync interval — how often to reconcile DNS with cluster state
+interval: 1m
+
+# Recreate strategy — only one replica should run to avoid duplicate API calls
+deploymentStrategy:
+  type: Recreate

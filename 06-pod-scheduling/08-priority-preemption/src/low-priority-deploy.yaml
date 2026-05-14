@@ -1,0 +1,27 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: low-priority-deploy
+spec:
+  replicas: 20
+  selector:
+    matchLabels:
+      app: low-priority
+  template:
+    metadata:
+      labels:
+        app: low-priority
+    spec:
+      terminationGracePeriodSeconds: 0
+      priorityClassName: low
+      containers:
+        - name: app
+          image: busybox
+          command: ["sh", "-c", "sleep 3600"]
+          resources:
+            requests:
+              cpu: "1500m"      # 10 × 1500m = 15,000m per node
+              memory: "500Mi"   # 10 × 500Mi = 5,000Mi per node — well within 15.8Gi
+            limits:
+              cpu: "1500m"
+              memory: "500Mi"
