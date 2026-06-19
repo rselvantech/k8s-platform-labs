@@ -1,0 +1,19 @@
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: app-hpa-container-resource
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: multi-container-app
+  minReplicas: 1
+  maxReplicas: 5
+  metrics:
+    - type: ContainerResource       # targets ONE container, not the whole pod
+      containerResource:
+        name: cpu
+        container: app              # only "app" container's CPU is measured
+        target:
+          type: Utilization
+          averageUtilization: 50    # scale when "app" CPU > 50% of its request

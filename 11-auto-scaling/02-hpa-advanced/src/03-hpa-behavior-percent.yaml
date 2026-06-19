@@ -1,0 +1,33 @@
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: app-hpa-behavior-percent
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: multi-container-app
+  minReplicas: 1
+  maxReplicas: 10
+  metrics:
+    - type: Resource                # pod-level, not ContainerResource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 50
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 0  # scale up immediately (default)
+      selectPolicy: Max
+      policies:
+        - type: Percent              # Percent, not Pods (compare with 01-autoscaling Step 8)
+          value: 100                 # double current replica count...
+          periodSeconds: 30          # ...at most once per 30 seconds
+    scaleDown:
+      stabilizationWindowSeconds: 60
+      selectPolicy: Max
+      policies:
+        - type: Percent
+          value: 50                  # halve current replica count...
+          periodSeconds: 60          # ...at most once per 60 seconds
