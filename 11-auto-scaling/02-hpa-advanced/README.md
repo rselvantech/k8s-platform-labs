@@ -15,7 +15,7 @@ Two gaps stand out once you have used HPA on a single-container pod: what happen
 - The External Metrics API (`external.metrics.k8s.io`), the `External` metric type, and metrics adapter architecture
 - A decision framework for choosing among all five HPA metric types
 
-> **Scope note:** Steps 1–3 are hands-on (minikube `3node`, the same cluster as `01-autoscaling`, metrics-server already enabled). Steps 4–6 are theory only — covering the Custom/External Metrics pipeline conceptually. The hands-on practical for that pipeline (Prometheus Adapter, CloudWatch adapter, on EKS) is covered in `aws-eks-demos`.
+> **Scope note:** Steps 1–3 are hands-on (minikube `3node`, the same cluster as `01-autoscaling`, metrics-server already enabled). Step 4 (Decision Framework) is a short theory step — no cluster commands. For deeper adapter architecture and E2E flows, see `## Kubernetes Scaling — API & Adapter Reference` below. Prometheus-based custom metrics (`Pods`/`Object` types with Prometheus Adapter) are covered hands-on in `11-auto-scaling/05-prometheus-adapter` (minikube `3node`). AWS-specific external metrics (SQS, ALB, CloudWatch) are covered in `aws-eks-demos`.
 
 > **Verification status:** Steps 1–3 expected outputs and Break-Fix scenarios are written from documented HPA v2 behaviour, consistent with the facts already verified in `01-autoscaling`. They have not yet been run against this lab's manifests on a live cluster — run through Steps 1–3 and Break-Fix on your `3node` cluster and report back anything that differs.
 
@@ -49,9 +49,11 @@ By the end of this lab, you will be able to:
 3. ✅ Explain why a `Resource`-type HPA can scale based on a non-targeted container's load, and how `ContainerResource` avoids this
 4. ✅ Configure HPA `behavior` using `Percent`-type scale-up and scale-down policies
 5. ✅ Calculate the step-size effect of `Percent` policies and compare it against the `Pods`-based policies from `01-autoscaling`
-6. ✅ Explain the Custom Metrics API and the `Pods`/`Object` HPA metric types
-7. ✅ Explain the External Metrics API and the role of a metrics adapter (Prometheus Adapter, CloudWatch adapter)
-8. ✅ Choose the correct HPA metric type for a given scaling scenario across all five types
+6. ✅ Explain the purpose of `selectPolicy` (Min/Max/Disabled) and how multiple policies interact
+7. ✅ Choose the correct HPA metric type for a given scaling scenario across all five types
+8. ✅ Describe the role of a metrics adapter and which HPA metric types require one
+
+> **Reference:** For full adapter architecture, E2E flows, VPA/CA API usage, KEDA, and Prometheus Adapter configuration, see `## Kubernetes Scaling — API & Adapter Reference`.
 
 ---
 
@@ -195,6 +197,769 @@ Percent, value: 100, periodSeconds: 30:
 ```
 
 At **small** replica counts, `Pods` with a large `value` reaches desired faster (linear, fixed step). At **large** replica counts, `Percent` reaches it faster (the step grows with current size). The same applies to `scaleDown`: `Percent, value: 50` halves per period vs `01-autoscaling`'s `Pods, value: 2` which removed at most 2 per period regardless of fleet size.
+
+---
+
+## Kubernetes Scaling — API & Adapter Reference
+
+> **Purpose:** Infrastructure and API layer reference for Kubernetes autoscaling. Covers
+> the three metrics API groups, the adapter ecosystem, how HPA/VPA/CA relate to those
+> APIs, E2E flows, and a Prometheus Adapter configuration checklist. Read this alongside
+> the lab steps — not as a prerequisite to them.
+>
+> **Hands-on covered elsewhere:**
+> - HPA usage, YAML, scaling behaviour → `01-autoscaling`
+> - VPA installation and usage → `03-vpa-advanced`
+> - Prometheus Adapter hands-on → `11-auto-scaling/05-prometheus-adapter` (minikube `3node`)
+> - AWS-specific sources (SQS, ALB, CloudWatch), CA, KEDA SQS → `aws-eks-demos`
+> - KEDA core (Kafka, Redis, Prometheus scalers) → `04-keda`
+
+---
+
+### 1. The Kubernetes Scaling Landscape
+
+Kubernetes has three distinct autoscaling mechanisms. They operate at different levels and
+are completely independent of each other — different problems, different APIs, different
+components.
+
+```
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│                    KUBERNETES AUTOSCALING — THREE LAYERS                        │
+├──────────────┬──────────────────────┬──────────────────────────────────────────┤
+│  Mechanism   │  Answers             │  Scales                                  │
+├──────────────┼──────────────────────┼──────────────────────────────────────────┤
+│  HPA         │  How many pods?      │  Replica count of a Deployment/StatefulSet│
+│  VPA         │  How big per pod?    │  CPU/memory requests on individual pods  │
+│  CA          │  How many nodes?     │  Node count in the cluster               │
+└──────────────┴──────────────────────┴──────────────────────────────────────────┘
+```
+
+They can and often do work together:
+- HPA scales pod count based on load
+- VPA right-sizes what each pod requests
+- CA adds nodes when pods can't be scheduled due to insufficient cluster capacity
+
+---
+
+### 2. The Kubernetes Metrics APIs
+
+Kubernetes defines three Metrics API groups. Each covers a different category of metric.
+The key architectural point: **these are API contracts, not implementations**. Kubernetes
+defines what the API looks like; separate components implement it.
+
+```
+API Group                    Implemented By         Consumers
+──────────────────────────────────────────────────────────────────────────────
+metrics.k8s.io               metrics-server         HPA (Resource/ContainerResource)
+                                                    VPA Recommender
+                                                    kubectl top
+
+custom.metrics.k8s.io        metrics adapter        HPA (Pods, Object types)
+
+external.metrics.k8s.io      metrics adapter        HPA (External type)
+```
+
+#### 2.1 `metrics.k8s.io` — The Resource Metrics API
+
+Exposes **CPU and memory** for pods and nodes. Served by `metrics-server`, which reads
+from the `cAdvisor` agent embedded in each kubelet.
+
+This is the only API that VPA uses. It is also what HPA uses for `type: Resource` and
+`type: ContainerResource` metrics. `kubectl top pods` and `kubectl top nodes` query this
+API directly.
+
+**Characteristics:**
+- Near real-time (scraped every ~15s, 1-minute rolling window)
+- In-memory only — no historical data, no persistence
+- No configuration required beyond installing metrics-server
+
+#### 2.2 `custom.metrics.k8s.io` — The Custom Metrics API
+
+Exposes **arbitrary application-level metrics scoped to a Kubernetes object** (a pod,
+an Ingress, a Service, etc.). Used by HPA `type: Pods` and `type: Object`.
+
+Not implemented by metrics-server. Requires a **metrics adapter** to be installed and
+registered. The adapter is the bridge between a metrics backend (Prometheus, Datadog,
+etc.) and this API.
+
+**Characteristics:**
+- No built-in implementation — adapter required
+- Any metric that can be expressed as a value per Kubernetes object
+- Metric must be "owned by" a Kubernetes resource (a pod, ingress, service, etc.)
+
+#### 2.3 `external.metrics.k8s.io` — The External Metrics API
+
+Exposes **metrics from sources that have no Kubernetes representation** — AWS SQS queue
+depth, Kafka consumer lag, Redis queue length, etc. Used by HPA `type: External`.
+
+Also requires a **metrics adapter**. The `selector.matchLabels` in the HPA YAML is passed
+to the adapter to identify which external resource to query.
+
+**Characteristics:**
+- No built-in implementation — adapter required
+- Metric source exists entirely outside the Kubernetes object model
+- No `kubectl get` resource corresponds to the metric source
+
+---
+
+### 3. How Each Scaler Uses (or Doesn't Use) These APIs
+
+```
+┌────────┬──────────────────────────┬────────────────────────┬───────────────────────┐
+│        │  metrics.k8s.io          │  custom.metrics.k8s.io │  external.metrics.k8s │
+│        │  (metrics-server)        │  (adapter required)    │  (adapter required)   │
+├────────┼──────────────────────────┼────────────────────────┼───────────────────────┤
+│  HPA   │  ✅ Resource,            │  ✅ Pods, Object       │  ✅ External          │
+│        │     ContainerResource    │                        │                       │
+├────────┼──────────────────────────┼────────────────────────┼───────────────────────┤
+│  VPA   │  ✅ reads usage history  │  ✗ never               │  ✗ never              │
+│        │     for recommendations  │                        │                       │
+├────────┼──────────────────────────┼────────────────────────┼───────────────────────┤
+│  CA    │  ✗ never                 │  ✗ never               │  ✗ never              │
+│        │  (doesn't use any        │                        │                       │
+│        │   metrics API)           │                        │                       │
+└────────┴──────────────────────────┴────────────────────────┴───────────────────────┘
+```
+
+This table is the core insight: **only HPA uses the custom and external metrics APIs**.
+VPA only ever reads from `metrics.k8s.io`. CA does not use any metrics API at all.
+
+---
+
+### 4. VPA — How It Gets Metrics (No Adapter Needed)
+
+VPA has three components, each with a distinct job:
+
+```
+┌──────────────────────────────────────────────────────────────────────────┐
+│  VPA Recommender                                                         │
+│    ├─ Queries metrics.k8s.io (metrics-server) for current CPU/memory     │
+│    ├─ Optionally queries a Prometheus-compatible API for longer history  │
+│    │  (requires --history-provider-address flag at install — not default)│
+│    ├─ Computes recommended request/limit values per container            │
+│    └─ Writes recommendations to the VPA object status                    │
+│                                                                          │
+│  VPA Admission Controller (webhook)                                      │
+│    ├─ Intercepts new pod creation requests                               │
+│    ├─ Reads the VPA recommendation for that pod's owner                  │
+│    └─ Mutates the pod spec: sets resource requests to recommended values │
+│                                                                          │
+│  VPA Updater                                                             │
+│    ├─ Watches running pods whose requests differ from recommendation     │
+│    └─ Evicts those pods so they restart and get the new requests applied │
+│       via the Admission Controller                                       │
+└──────────────────────────────────────────────────────────────────────────┘
+```
+
+**Key points:**
+- VPA only reads `metrics.k8s.io` — the same API that `kubectl top` uses
+- No custom metrics adapter is involved
+- VPA does not scale replicas — it changes the resource requests on the pod spec
+- The Recommender uses historical data; the Admission Controller and Updater act on it
+- VPA and HPA should not both target CPU/memory on the same Deployment simultaneously
+  (they will fight). VPA + HPA is safe when HPA uses custom/external metrics and VPA
+  manages CPU/memory requests.
+
+---
+
+### 5. CA — No Metrics API Involved
+
+CA (Cluster Autoscaler) operates entirely outside the metrics API layer. Its signal is
+the **Kubernetes scheduler state**, not any metric value.
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│  SCALE UP trigger:                                                       │
+│    Pod enters Pending state because no node has enough CPU/memory        │
+│    CA detects: "scheduler cannot place this pod"                         │
+│    CA calls cloud provider API to add a node                             │
+│    New node joins → scheduler places the pending pod                     │
+│                                                                          │
+│  SCALE DOWN trigger:                                                     │
+│    CA identifies underutilised nodes where all pods could be             │
+│    rescheduled onto other nodes                                          │
+│    CA cordons and drains the node, then calls cloud provider to remove it│
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+**What CA talks to:**
+
+```
+CA does NOT query:
+  ✗  metrics.k8s.io
+  ✗  custom.metrics.k8s.io
+  ✗  external.metrics.k8s.io
+  ✗  Prometheus
+  ✗  Any metrics adapter
+
+CA DOES talk to:
+  ✅  Kubernetes API server (to watch pod scheduling state)
+  ✅  Cloud provider API (to add/remove nodes)
+        AWS   → EC2 Auto Scaling Groups API
+        GCP   → Managed Instance Groups API
+        Azure → Virtual Machine Scale Sets API
+```
+
+**Why CA requires cloud infrastructure:** It must be able to call a cloud provider API to
+provision or deprovision nodes. On minikube or bare-metal clusters, there is no cloud
+provider to call — CA has nothing to drive. This is why the CA lab is in the EKS demo
+series: it requires real AWS Auto Scaling Groups behind the node groups.
+
+**How CA and HPA interact in practice:**
+
+```
+1. HPA scales a Deployment from 3 → 10 pods (due to high traffic)
+2. The cluster only has capacity for 7 more pods
+3. 3 pods enter Pending state — scheduler cannot place them
+4. CA detects the Pending pods and adds nodes
+5. New nodes join → scheduler places the remaining 3 pods
+6. Traffic drops → HPA scales back to 3 pods
+7. Several nodes become underutilised → CA removes them
+```
+
+HPA and CA do not communicate directly. CA simply reacts to what the scheduler reports.
+
+---
+
+### 6. `metrics-server` — What It Is and Is Not
+
+`metrics-server` is a lean, in-memory implementation of the `metrics.k8s.io` API. It is
+the only standard component that implements this API and is a prerequisite for HPA
+`type: Resource` and for VPA.
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│  metrics-server                                                          │
+│                                                                          │
+│  Reads from:  cAdvisor (embedded in each kubelet)                        │
+│  Exposes:     CPU and memory for pods and nodes                          │
+│  API served:  metrics.k8s.io                                             │
+│  Storage:     in-memory only (no persistence, no history)                │
+│  Window:      most recent ~1 minute of data                              │
+│                                                                          │
+│  Does NOT:                                                               │
+│    ✗ serve custom.metrics.k8s.io                                         │
+│    ✗ serve external.metrics.k8s.io                                       │
+│    ✗ store historical data                                               │
+│    ✗ understand application-level metrics                                │
+│    ✗ replace Prometheus (different purpose, different scope)             │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+`metrics-server` vs Prometheus is a common source of confusion:
+
+```
+metrics-server:
+  Purpose:   serve the Kubernetes metrics.k8s.io API (for HPA + VPA + kubectl top)
+  Scope:     CPU and memory only
+  History:   none — in-memory, ~1 min window
+  HPA use:   type: Resource, type: ContainerResource
+
+Prometheus:
+  Purpose:   general-purpose time-series metrics database
+  Scope:     any metric any application exposes
+  History:   configurable retention (days, weeks, months)
+  HPA use:   indirect — via Prometheus Adapter serving custom.metrics.k8s.io
+```
+
+They are not alternatives to each other — they serve entirely different purposes.
+Many clusters run both: metrics-server for the Kubernetes metrics API, Prometheus for
+observability and as the backend for HPA custom metrics via the adapter.
+
+---
+
+### 7. What Is a Metrics Adapter?
+
+A **metrics adapter** is a Kubernetes component (a Deployment) that:
+
+1. Implements `custom.metrics.k8s.io` and/or `external.metrics.k8s.io`
+2. Registers itself with the Kubernetes API server as an `APIService` for those groups
+3. Fetches values from a backend (Prometheus, CloudWatch, etc.) when queried by HPA
+4. Returns results in the format the HPA controller expects
+
+> **"Metrics adapter" is a role, not a product.** Any component implementing the API
+> contract fills this role. metrics-server is the built-in adapter for `metrics.k8s.io`;
+> there is no built-in adapter for the other two — you choose and install one.
+
+#### 7.1 How the Adapter Registers Itself
+
+```yaml
+apiVersion: apiregistration.k8s.io/v1
+kind: APIService
+metadata:
+  name: v1beta1.custom.metrics.k8s.io
+spec:
+  service:
+    name: prometheus-adapter
+    namespace: monitoring
+  group: custom.metrics.k8s.io
+  version: v1beta1
+  groupPriorityMinimum: 100
+  versionPriority: 100
+```
+
+Once registered, all requests to `/apis/custom.metrics.k8s.io/...` arriving at
+kube-apiserver are proxied to the adapter's Service. The HPA controller has no direct
+connection to the adapter — it always goes through kube-apiserver.
+
+#### 7.2 Available Adapter Implementations
+
+| Adapter | Backend | API Groups Covered | Cluster Support |
+|---|---|---|---|
+| **Prometheus Adapter** | Prometheus | `custom.metrics.k8s.io` + `external.metrics.k8s.io` | Any cluster |
+| **KEDA** | SQS, Kafka, Redis, Prometheus, HTTP, 50+ | `external.metrics.k8s.io` | Any cluster (scaler-dependent) |
+| **CloudWatch Metrics Adapter** | AWS CloudWatch | `external.metrics.k8s.io` | EKS / AWS only — **archived**, no longer maintained. Use KEDA SQS scaler instead. |
+| **Datadog Cluster Agent** | Datadog | `custom.metrics.k8s.io` + `external.metrics.k8s.io` | Any cluster (needs Datadog subscription) |
+
+#### 7.3 Adapter Ownership, Licensing, and Resources
+
+**Prometheus Adapter**
+- Maintained by the Kubernetes community under `kubernetes-sigs` (official Kubernetes
+  Special Interest Groups). Licensed Apache 2.0. Not tied to any company.
+- GitHub: https://github.com/kubernetes-sigs/prometheus-adapter
+- Helm: https://artifacthub.io/packages/helm/prometheus-community/prometheus-adapter
+
+**KEDA (Kubernetes Event-Driven Autoscaling)**
+- Originally created at Microsoft; donated to CNCF in 2020; reached CNCF **Graduated**
+  status August 2023. Primary sponsors: Microsoft Azure, Snyk, VexxHost. Apache 2.0.
+- Cloud-agnostic — runs on any Kubernetes cluster. Only specific scalers (e.g. SQS)
+  require cloud access; scalers like Kafka, Redis, Prometheus run on minikube.
+- Website: https://keda.sh | GitHub: https://github.com/kedacore/keda
+
+**CloudWatch Metrics Adapter**
+- Originally by AWS under `awslabs`. Now **archived** — no longer actively maintained.
+  For new AWS-based scaling, KEDA's built-in SQS/CloudWatch scalers are the recommended
+  active path.
+- GitHub (archived): https://github.com/amazon-archives/k8s-cloudwatch-adapter
+
+**Datadog Cluster Agent**
+- Developed and maintained by Datadog (commercial). Requires a Datadog subscription.
+  Not open source in the same sense as the others.
+- Docs: https://docs.datadoghq.com/containers/cluster_agent
+
+---
+
+### 8. The HPA-Specific Metric Types and Which API Each Uses
+
+When the HPA controller processes a metric, the `type` field unconditionally determines
+which API group is queried. There is no configuration for this routing.
+
+```
+type: Resource          → queries metrics.k8s.io         (metrics-server)
+type: ContainerResource → queries metrics.k8s.io         (metrics-server)
+type: Pods              → queries custom.metrics.k8s.io  (adapter required)
+type: Object            → queries custom.metrics.k8s.io  (adapter required)
+type: External          → queries external.metrics.k8s.io (adapter required)
+```
+
+If the required API has no backend registered:
+- HPA metric status shows `<unknown>` permanently
+- HPA holds the current replica count (does not scale)
+- No error is thrown — the HPA silently waits
+
+#### 8.1 `Pods` Type — Per-Pod Custom Metric, Averaged
+
+HPA gets one value per pod from the adapter, averages them, compares to `averageValue`.
+
+```yaml
+metrics:
+  - type: Pods
+    pods:
+      metric:
+        name: requests_per_second
+      target:
+        type: AverageValue
+        averageValue: "1000"          # target 1000 req/s per pod (average)
+```
+
+API path queried:
+```
+GET /apis/custom.metrics.k8s.io/v1beta1/namespaces/{ns}/pods/*/{metric-name}
+```
+
+#### 8.2 `Object` Type — Single Value from One Kubernetes Object
+
+HPA gets one aggregate value for a named Kubernetes object (not per-pod). The object
+the metric belongs to (e.g. an Ingress) is usually different from the object being
+scaled (e.g. a backend Deployment).
+
+```yaml
+metrics:
+  - type: Object
+    object:
+      metric:
+        name: requests_per_second
+      describedObject:
+        apiVersion: networking.k8s.io/v1
+        kind: Ingress
+        name: main-ingress
+      target:
+        type: Value
+        value: "10000"                # TOTAL requests/s on the Ingress
+```
+
+API path queried:
+```
+GET /apis/custom.metrics.k8s.io/v1beta1/namespaces/{ns}/
+        ingresses.networking.k8s.io/main-ingress/requests_per_second
+```
+
+Note: the Ingress itself does not emit this metric. The nginx-ingress-controller
+Deployment does — Prometheus scrapes it, the adapter maps it to the Ingress object.
+
+#### 8.3 `External` Type — Metric With No Kubernetes Owner
+
+Used for signals from entirely outside the Kubernetes object model (SQS, Kafka, Redis,
+databases). There is no `describedObject` — only a label selector that the adapter
+interprets to identify which external resource to query.
+
+```yaml
+metrics:
+  - type: External
+    external:
+      metric:
+        name: sqs_queue_depth
+        selector:
+          matchLabels:
+            queue: orders
+      target:
+        type: AverageValue
+        averageValue: "30"            # target 30 messages per worker pod
+```
+
+API path queried:
+```
+GET /apis/external.metrics.k8s.io/v1beta1/namespaces/{ns}/
+        sqs_queue_depth?labelSelector=queue=orders
+```
+
+---
+
+### 9. Prometheus and the Prometheus Adapter — The Relationship
+
+A common source of confusion: Prometheus and the Prometheus Adapter are two entirely
+separate components with different jobs.
+
+```
+Prometheus:
+  ├─ A time-series database and scraping engine
+  ├─ Scrapes /metrics endpoints from pods (Prometheus exposition format)
+  ├─ Stores time-series data with configurable retention
+  ├─ Exposes a PromQL HTTP query API (used by Grafana, alerting rules, etc.)
+  └─ Has NO knowledge of the Kubernetes Custom Metrics API
+
+Prometheus Adapter:
+  ├─ A separate Deployment in the cluster
+  ├─ Implements custom.metrics.k8s.io and external.metrics.k8s.io
+  ├─ Registered with kube-apiserver as an APIService
+  ├─ When HPA requests a metric:
+  │    1. Translates the request into a PromQL query
+  │    2. Runs that query against Prometheus (same HTTP API Grafana uses)
+  │    3. Returns the result in the Custom Metrics API format
+  └─ All mapping rules live in the adapter's ConfigMap — Prometheus needs zero changes
+```
+
+#### 9.1 Full Component Stack — Prometheus-backed HPA
+
+```
+Application Pods  →  /metrics endpoint (Prometheus format)
+        │
+        │  scrape every 15s
+        ▼
+Prometheus  →  stores time-series  →  Grafana (dashboards)
+        │
+        │  PromQL queries (same HTTP API)
+        ▼
+Prometheus Adapter  →  registered as APIService for custom.metrics.k8s.io
+        │
+        │  Custom Metrics API (via kube-apiserver proxy)
+        ▼
+HPA Controller  →  calculates desiredReplicas  →  updates Deployment
+```
+
+#### 9.2 Prometheus Adapter ConfigMap — How Rules Work
+
+```yaml
+rules:
+  - seriesQuery: 'http_requests_total{namespace!="",pod!=""}'
+    #  which Prometheus metric series this rule covers
+
+    resources:
+      overrides:
+        namespace: {resource: "namespace"}
+        pod:       {resource: "pod"}
+    #  maps Prometheus labels to Kubernetes resource names
+    #  so the adapter knows which pod/namespace the metric belongs to
+
+    name:
+      matches: "^(.*)_total$"
+      as: "${1}_per_second"
+    #  the Custom Metrics API name exposed to HPA
+    #  "http_requests_total" → "http_requests_per_second"
+
+    metricsQuery: 'sum(rate(<<.Series>>{<<.LabelMatchers>>}[2m])) by (<<.GroupBy>>)'
+    #  PromQL query run when HPA requests this metric
+    #  template variables filled by the adapter per request
+```
+
+#### 9.3 What Needs to Be Configured in Prometheus?
+
+**Nothing.** Prometheus only needs to already be scraping the relevant pods. The adapter
+reads from Prometheus using the standard PromQL HTTP API — the same way Grafana does.
+All mapping configuration lives in the adapter's ConfigMap, not in Prometheus.
+
+#### 9.4 Cluster Requirements
+
+| Component | Works On |
+|---|---|
+| metrics-server | Any cluster |
+| Prometheus + Prometheus Adapter | Any cluster — minikube, kind, EKS, GKE, AKS (Prometheus must be separately deployed — not bundled) |
+| KEDA (core + Kafka/Redis/Prometheus scalers) | Any cluster (cloud-specific scalers such as SQS require AWS credentials) |
+| CloudWatch Metrics Adapter (archived) | EKS or any cluster with AWS credentials |
+| Cluster Autoscaler | Cloud clusters only (EKS, GKE, AKS — needs cloud node API) |
+
+---
+
+### 10. KEDA — Event-Driven Scaling and Scale-to-Zero
+
+KEDA (Kubernetes Event-Driven Autoscaling) fills the gap between native HPA and
+event-driven workloads. It is a CNCF Graduated project (not AWS/cloud-specific) that
+installs its own metrics adapter and extends HPA with two key capabilities:
+
+**1. Scale to zero** — native HPA requires `minReplicas ≥ 1`. KEDA can scale a
+Deployment to 0 replicas when there is no work, and from 0 when work arrives.
+
+**2. 50+ built-in scalers** — no need to configure a separate adapter per source.
+
+```
+KEDA architecture:
+  ScaledObject (CRD)  →  KEDA Operator  →  creates/manages an HPA
+  KEDA Metrics Server →  implements external.metrics.k8s.io
+  Scaler              →  polls the event source (SQS, Kafka, Redis, etc.)
+```
+
+KEDA does not replace HPA — it creates and manages HPA objects under the hood. The
+HPA still does the actual pod scaling; KEDA feeds it the metric values via its own
+adapter and handles the scale-to-zero logic that HPA cannot express.
+
+**Scaler cloud requirements:**
+
+| KEDA Scaler | Requires Cloud? | Works on Minikube? |
+|---|---|---|
+| SQS scaler | Yes — AWS credentials + SQS queue | No |
+| Kafka scaler | No | Yes |
+| Redis scaler | No | Yes |
+| Prometheus scaler | No | Yes |
+| Cron scaler | No | Yes |
+| HTTP scaler | No | Yes |
+
+---
+
+### 11. Complete Comparison — All Three Scalers
+
+```
+┌──────────────┬──────────────────────┬──────────────────────┬─────────────────────┐
+│              │  HPA                 │  VPA                 │  CA                 │
+├──────────────┼──────────────────────┼──────────────────────┼─────────────────────┤
+│ Scales       │  Pod replica count   │  Pod CPU/mem         │  Node count         │
+│              │                      │  requests/limits     │                     │
+├──────────────┼──────────────────────┼──────────────────────┼─────────────────────┤
+│ Signal       │  Metric value vs     │  Observed CPU/mem    │  Pending pods       │
+│              │  target threshold    │  usage over time     │  (scheduler state)  │
+├──────────────┼──────────────────────┼──────────────────────┼─────────────────────┤
+│ Uses         │  metrics.k8s.io      │  metrics.k8s.io      │  None               │
+│ metrics API  │  custom.metrics.k8s  │  only                │                     │
+│              │  external.metrics.k8s│                      │                     │
+├──────────────┼──────────────────────┼──────────────────────┼─────────────────────┤
+│ Adapter      │  Required for Pods,  │  Not required        │  Not required       │
+│ needed?      │  Object, External    │                      │                     │
+│              │  types               │                      │                     │
+├──────────────┼──────────────────────┼──────────────────────┼─────────────────────┤
+│ Talks to     │  kube-apiserver      │  kube-apiserver      │  kube-apiserver     │
+│              │  (metrics APIs)      │  (metrics.k8s.io)    │  (pod scheduling)   │
+│              │                      │                      │  Cloud provider API │
+├──────────────┼──────────────────────┼──────────────────────┼─────────────────────┤
+│ Cloud        │  No                  │  No                  │  Yes — needs cloud  │
+│ required?    │                      │                      │  node provisioning  │
+├──────────────┼──────────────────────┼──────────────────────┼─────────────────────┤
+│ Minikube     │  Yes                 │  Yes                 │  No                 │
+│ compatible?  │                      │                      │                     │
+├──────────────┼──────────────────────┼──────────────────────┼─────────────────────┤
+│ Scale to     │  No (min 1 replica)  │  N/A                 │  N/A                │
+│ zero?        │  KEDA can            │                      │                     │
+├──────────────┼──────────────────────┼──────────────────────┼─────────────────────┤
+│ Safe to use  │  Yes, if HPA uses    │  Yes, if VPA manages │  Yes — CA reacts    │
+│ together?    │  custom/external     │  CPU/mem and HPA     │  to HPA/VPA output; │
+│              │  metrics (not CPU)   │  uses other metrics  │  no conflict        │
+└──────────────┴──────────────────────┴──────────────────────┴─────────────────────┘
+```
+
+---
+
+### 12. Typical Conflict: HPA + VPA on the Same Deployment
+
+HPA and VPA should not both target **CPU or memory** on the same Deployment simultaneously.
+They will fight:
+- HPA adds replicas because average CPU is high
+- VPA increases CPU requests per pod
+- More CPU requested → pods are harder to schedule → CA adds nodes
+- VPA increasing requests may lower the CPU *utilisation percentage* → HPA scales back down
+- The loop repeats unpredictably
+
+**Safe combinations:**
+
+```
+HPA on CPU/memory + VPA on CPU/memory  →  conflict (do not use)
+
+HPA on custom metrics (req/s, queue)   →  safe (different signals, no conflict)
++ VPA on CPU/memory
+
+HPA on anything + CA                   →  safe (CA just reacts to pending pods)
+
+VPA + CA                               →  safe (VPA changes requests, CA responds
+                                            to resulting scheduling pressure)
+
+All three (HPA custom + VPA + CA)      →  safe and recommended for production:
+                                            HPA: right pod count
+                                            VPA: right pod size
+                                            CA:  right node count
+```
+
+---
+
+### 13. E2E Flows for Adapter-Dependent HPA Types
+
+The following flows show the complete chain for each HPA metric type that requires
+an adapter. Types `Resource` and `ContainerResource` (metrics-server, no adapter)
+are not included — those are covered in the `01-autoscaling` demo.
+
+#### 13.1 `Pods` Type — Prometheus Adapter
+
+```
+Application pods → expose /metrics (Prometheus format)
+        │ scrape every 15s
+        ▼
+Prometheus → stores http_requests_total time series per pod
+        │ PromQL
+        ▼
+Prometheus Adapter (ConfigMap rule):
+  seriesQuery:   http_requests_total{namespace!="",pod!=""}
+  name:          → requests_per_second
+  metricsQuery:  sum(rate(...[2m])) by (pod)
+        │ custom.metrics.k8s.io
+        ▼
+kube-apiserver proxies GET /apis/custom.metrics.k8s.io/v1beta1/
+  namespaces/default/pods/*/requests_per_second
+        │
+        ▼
+HPA Controller:
+  receives per-pod values [1200, 950, 800] req/s
+  average = 983, target = 1000 → no change
+  if average = 1500 → ceil[3 × (1500/1000)] = 5 replicas
+```
+
+#### 13.2 `Object` Type — Prometheus Adapter (Ingress example)
+
+```
+nginx-ingress-controller → exposes /metrics including
+  nginx_ingress_controller_requests_total{ingress="main-ingress"}
+        │ scrape
+        ▼
+Prometheus → stores the time series
+        │ PromQL
+        ▼
+Prometheus Adapter (ConfigMap rule):
+  seriesQuery:   nginx_ingress_controller_requests_total{ingress!=""}
+  resources:     ingress label → networking.k8s.io/ingresses object
+  name:          → requests_per_second
+  metricsQuery:  sum(rate(...[2m]))   ← ONE value, not per-pod
+        │ custom.metrics.k8s.io
+        ▼
+kube-apiserver proxies GET /apis/custom.metrics.k8s.io/v1beta1/
+  namespaces/default/ingresses.networking.k8s.io/main-ingress/requests_per_second
+        │
+        ▼
+HPA Controller:
+  receives ONE value: 12,000 req/s
+  target: 10,000 → ceil[3 × (12000/10000)] = 4 replicas
+
+```
+> **Critical design decision — `Value` vs `AverageValue` for Object type:**
+> When using `target.type: Value`, the HPA compares the raw Ingress total directly
+> to the target. Adding more backend pods does NOT reduce the Ingress total —
+> traffic keeps arriving at the same rate. This means the HPA will keep scaling
+> until it hits `maxReplicas`, because the metric never drops below the target
+> just from adding pods.
+>
+> Use `target.type: AverageValue` instead to divide the total by the current pod
+> count. This makes Object type behave like Pods type for the scaling math:
+> adding a pod reduces the per-pod share of the total, which reduces the HPA's
+> perceived demand and stabilises the replica count.
+>
+> ```yaml
+> target:
+>   type: AverageValue    # total Ingress req/s ÷ current pod count
+>   averageValue: "3000"  # target 3000 req/s per backend pod
+> ```
+
+#### 13.3 `External` Type — KEDA SQS scaler (EKS)
+
+```
+AWS SQS queue "orders"
+  ApproximateNumberOfMessages = 900
+  CloudWatch records this automatically
+        │ CloudWatch API
+        ▼
+KEDA Metrics Server (in kube-system):
+  ScaledObject defines: SQS queue=orders, targetValue=30
+  KEDA polls SQS/CloudWatch every 30s
+        │ external.metrics.k8s.io
+        ▼
+kube-apiserver proxies GET /apis/external.metrics.k8s.io/v1beta1/
+  namespaces/default/sqs_queue_depth?labelSelector=queue=orders
+        │
+        ▼
+HPA Controller (created and managed by KEDA):
+  current = 900, target = 30 per pod, current pods = 5
+  desired = ceil[5 × (900/30)] = 150 → capped at maxReplicas
+
+  Queue drains to 0:
+  desired = 0 → KEDA scales to 0 (native HPA would floor at minReplicas=1)
+```
+
+---
+
+### 14. Configuration Checklist — Prometheus Adapter Setup
+
+For HPA `Pods` or `Object` metrics backed by Prometheus:
+
+```
+□ 1. Application pods expose /metrics in Prometheus exposition format
+
+□ 2. Prometheus is scraping those pods
+     verify: port-forward to Prometheus UI → query the metric series
+
+□ 3. Prometheus Adapter installed and pointed at Prometheus service URL
+     helm: prometheus-community/prometheus-adapter
+
+□ 4. Adapter ConfigMap rule defines:
+     a. seriesQuery  — which Prometheus series this rule covers
+     b. resources    — maps Prometheus labels to Kubernetes resource names
+     c. name.as      — the Custom Metrics API name HPA will reference
+     d. metricsQuery — the PromQL query to run per HPA request
+
+□ 5. APIService registered and healthy:
+     kubectl get apiservices | grep custom.metrics
+     → v1beta1.custom.metrics.k8s.io ... True
+
+□ 6. Metric visible in the API:
+     kubectl get --raw /apis/custom.metrics.k8s.io/v1beta1/ | jq .
+
+□ 7. HPA metric name matches name.as in the adapter ConfigMap rule
+
+□ 8. HPA status shows a current value (not <unknown>):
+     kubectl describe hpa <name>
+```
 
 ---
 
@@ -511,758 +1276,8 @@ kubectl delete -f 03-hpa-behavior-percent.yaml
 
 ---
 
-## Kubernetes Scaling — API & Adapter Reference
+### Step 4 — HPA Metric Type Decision Framework
 
-> **Purpose of this document:** This is the infrastructure and API layer reference for
-> Kubernetes scaling. It covers the metrics APIs, adapter ecosystem, and how HPA, VPA,
-> and CA relate to those APIs. It does NOT cover how to configure or use HPA, VPA, or CA
-> in practice — those are handled in their respective demo series.
->
-> **What is covered elsewhere:**
-> - HPA usage, metric types, YAML, scaling behaviour → `01-autoscaling` demo
-> - VPA installation and usage → VPA demo
-> - CA theory and lab → `aws-eks-demos` (CA requires cloud node provisioning)
-> - Prometheus Adapter hands-on → `03-prometheus-adapter` (minikube)
-> - AWS-specific sources (SQS, ALB, CloudWatch) → `aws-eks-demos`
-> - KEDA → `04-keda` demo
-
----
-
-### 1. The Kubernetes Scaling Landscape
-
-Kubernetes has three distinct autoscaling mechanisms. They operate at different levels and
-are completely independent of each other — different problems, different APIs, different
-components.
-
-```
-┌─────────────────────────────────────────────────────────────────────────────────┐
-│                    KUBERNETES AUTOSCALING — THREE LAYERS                        │
-├──────────────┬──────────────────────┬──────────────────────────────────────────┤
-│  Mechanism   │  Answers             │  Scales                                  │
-├──────────────┼──────────────────────┼──────────────────────────────────────────┤
-│  HPA         │  How many pods?      │  Replica count of a Deployment/StatefulSet│
-│  VPA         │  How big per pod?    │  CPU/memory requests on individual pods  │
-│  CA          │  How many nodes?     │  Node count in the cluster               │
-└──────────────┴──────────────────────┴──────────────────────────────────────────┘
-```
-
-They can and often do work together:
-- HPA scales pod count based on load
-- VPA right-sizes what each pod requests
-- CA adds nodes when pods can't be scheduled due to insufficient cluster capacity
-
----
-
-### 2. The Kubernetes Metrics APIs
-
-Kubernetes defines three Metrics API groups. Each covers a different category of metric.
-The key architectural point: **these are API contracts, not implementations**. Kubernetes
-defines what the API looks like; separate components implement it.
-
-```
-API Group                    Implemented By         Consumers
-──────────────────────────────────────────────────────────────────────────────
-metrics.k8s.io               metrics-server         HPA (Resource/ContainerResource)
-                                                    VPA Recommender
-                                                    kubectl top
-
-custom.metrics.k8s.io        metrics adapter        HPA (Pods, Object types)
-
-external.metrics.k8s.io      metrics adapter        HPA (External type)
-```
-
-#### 2.1 `metrics.k8s.io` — The Resource Metrics API
-
-Exposes **CPU and memory** for pods and nodes. Served by `metrics-server`, which reads
-from the `cAdvisor` agent embedded in each kubelet.
-
-This is the only API that VPA uses. It is also what HPA uses for `type: Resource` and
-`type: ContainerResource` metrics. `kubectl top pods` and `kubectl top nodes` query this
-API directly.
-
-**Characteristics:**
-- Near real-time (scraped every ~15s, 1-minute rolling window)
-- In-memory only — no historical data, no persistence
-- No configuration required beyond installing metrics-server
-
-#### 2.2 `custom.metrics.k8s.io` — The Custom Metrics API
-
-Exposes **arbitrary application-level metrics scoped to a Kubernetes object** (a pod,
-an Ingress, a Service, etc.). Used by HPA `type: Pods` and `type: Object`.
-
-Not implemented by metrics-server. Requires a **metrics adapter** to be installed and
-registered. The adapter is the bridge between a metrics backend (Prometheus, Datadog,
-etc.) and this API.
-
-**Characteristics:**
-- No built-in implementation — adapter required
-- Any metric that can be expressed as a value per Kubernetes object
-- Metric must be "owned by" a Kubernetes resource (a pod, ingress, service, etc.)
-
-#### 2.3 `external.metrics.k8s.io` — The External Metrics API
-
-Exposes **metrics from sources that have no Kubernetes representation** — AWS SQS queue
-depth, Kafka consumer lag, Redis queue length, etc. Used by HPA `type: External`.
-
-Also requires a **metrics adapter**. The `selector.matchLabels` in the HPA YAML is passed
-to the adapter to identify which external resource to query.
-
-**Characteristics:**
-- No built-in implementation — adapter required
-- Metric source exists entirely outside the Kubernetes object model
-- No `kubectl get` resource corresponds to the metric source
-
----
-
-### 3. How Each Scaler Uses (or Doesn't Use) These APIs
-
-```
-┌────────┬──────────────────────────┬────────────────────────┬───────────────────────┐
-│        │  metrics.k8s.io          │  custom.metrics.k8s.io │  external.metrics.k8s │
-│        │  (metrics-server)        │  (adapter required)    │  (adapter required)   │
-├────────┼──────────────────────────┼────────────────────────┼───────────────────────┤
-│  HPA   │  ✅ Resource,            │  ✅ Pods, Object       │  ✅ External          │
-│        │     ContainerResource    │                        │                       │
-├────────┼──────────────────────────┼────────────────────────┼───────────────────────┤
-│  VPA   │  ✅ reads usage history  │  ✗ never               │  ✗ never              │
-│        │     for recommendations  │                        │                       │
-├────────┼──────────────────────────┼────────────────────────┼───────────────────────┤
-│  CA    │  ✗ never                 │  ✗ never               │  ✗ never              │
-│        │  (doesn't use any        │                        │                       │
-│        │   metrics API)           │                        │                       │
-└────────┴──────────────────────────┴────────────────────────┴───────────────────────┘
-```
-
-This table is the core insight: **only HPA uses the custom and external metrics APIs**.
-VPA only ever reads from `metrics.k8s.io`. CA does not use any metrics API at all.
-
----
-
-### 4. VPA — How It Gets Metrics (No Adapter Needed)
-
-VPA has three components, each with a distinct job:
-
-```
-┌─────────────────────────────────────────────────────────────────────────┐
-│  VPA Recommender                                                         │
-│    ├─ Queries metrics.k8s.io (metrics-server) for current CPU/memory    │
-│    ├─ Also queries Prometheus (if available) for longer history          │
-│    ├─ Computes recommended request/limit values per container            │
-│    └─ Writes recommendations to the VPA object status                   │
-│                                                                          │
-│  VPA Admission Controller (webhook)                                      │
-│    ├─ Intercepts new pod creation requests                               │
-│    ├─ Reads the VPA recommendation for that pod's owner                  │
-│    └─ Mutates the pod spec: sets resource requests to recommended values │
-│                                                                          │
-│  VPA Updater                                                             │
-│    ├─ Watches running pods whose requests differ from recommendation     │
-│    └─ Evicts those pods so they restart and get the new requests applied │
-│       via the Admission Controller                                       │
-└─────────────────────────────────────────────────────────────────────────┘
-```
-
-**Key points:**
-- VPA only reads `metrics.k8s.io` — the same API that `kubectl top` uses
-- No custom metrics adapter is involved
-- VPA does not scale replicas — it changes the resource requests on the pod spec
-- The Recommender uses historical data; the Admission Controller and Updater act on it
-- VPA and HPA should not both target CPU/memory on the same Deployment simultaneously
-  (they will fight). VPA + HPA is safe when HPA uses custom/external metrics and VPA
-  manages CPU/memory requests.
-
----
-
-### 5. CA — No Metrics API Involved
-
-CA (Cluster Autoscaler) operates entirely outside the metrics API layer. Its signal is
-the **Kubernetes scheduler state**, not any metric value.
-
-```
-┌─────────────────────────────────────────────────────────────────────────┐
-│  SCALE UP trigger:                                                       │
-│    Pod enters Pending state because no node has enough CPU/memory        │
-│    CA detects: "scheduler cannot place this pod"                         │
-│    CA calls cloud provider API to add a node                             │
-│    New node joins → scheduler places the pending pod                     │
-│                                                                          │
-│  SCALE DOWN trigger:                                                     │
-│    CA identifies underutilised nodes where all pods could be             │
-│    rescheduled onto other nodes                                          │
-│    CA cordons and drains the node, then calls cloud provider to remove it│
-└─────────────────────────────────────────────────────────────────────────┘
-```
-
-**What CA talks to:**
-
-```
-CA does NOT query:
-  ✗  metrics.k8s.io
-  ✗  custom.metrics.k8s.io
-  ✗  external.metrics.k8s.io
-  ✗  Prometheus
-  ✗  Any metrics adapter
-
-CA DOES talk to:
-  ✅  Kubernetes API server (to watch pod scheduling state)
-  ✅  Cloud provider API (to add/remove nodes)
-        AWS   → EC2 Auto Scaling Groups API
-        GCP   → Managed Instance Groups API
-        Azure → Virtual Machine Scale Sets API
-```
-
-**Why CA requires cloud infrastructure:** It must be able to call a cloud provider API to
-provision or deprovision nodes. On minikube or bare-metal clusters, there is no cloud
-provider to call — CA has nothing to drive. This is why the CA lab is in the EKS demo
-series: it requires real AWS Auto Scaling Groups behind the node groups.
-
-**How CA and HPA interact in practice:**
-
-```
-1. HPA scales a Deployment from 3 → 10 pods (due to high traffic)
-2. The cluster only has capacity for 7 more pods
-3. 3 pods enter Pending state — scheduler cannot place them
-4. CA detects the Pending pods and adds nodes
-5. New nodes join → scheduler places the remaining 3 pods
-6. Traffic drops → HPA scales back to 3 pods
-7. Several nodes become underutilised → CA removes them
-```
-
-HPA and CA do not communicate directly. CA simply reacts to what the scheduler reports.
-
----
-
-### 6. `metrics-server` — What It Is and Is Not
-
-`metrics-server` is a lean, in-memory implementation of the `metrics.k8s.io` API. It is
-the only standard component that implements this API and is a prerequisite for HPA
-`type: Resource` and for VPA.
-
-```
-┌─────────────────────────────────────────────────────────────────────────┐
-│  metrics-server                                                          │
-│                                                                          │
-│  Reads from:  cAdvisor (embedded in each kubelet)                        │
-│  Exposes:     CPU and memory for pods and nodes                          │
-│  API served:  metrics.k8s.io                                             │
-│  Storage:     in-memory only (no persistence, no history)                │
-│  Window:      most recent ~1 minute of data                              │
-│                                                                          │
-│  Does NOT:                                                               │
-│    ✗ serve custom.metrics.k8s.io                                         │
-│    ✗ serve external.metrics.k8s.io                                       │
-│    ✗ store historical data                                               │
-│    ✗ understand application-level metrics                                │
-│    ✗ replace Prometheus (different purpose, different scope)             │
-└─────────────────────────────────────────────────────────────────────────┘
-```
-
-`metrics-server` vs Prometheus is a common source of confusion:
-
-```
-metrics-server:
-  Purpose:   serve the Kubernetes metrics.k8s.io API (for HPA + VPA + kubectl top)
-  Scope:     CPU and memory only
-  History:   none — in-memory, ~1 min window
-  HPA use:   type: Resource, type: ContainerResource
-
-Prometheus:
-  Purpose:   general-purpose time-series metrics database
-  Scope:     any metric any application exposes
-  History:   configurable retention (days, weeks, months)
-  HPA use:   indirect — via Prometheus Adapter serving custom.metrics.k8s.io
-```
-
-They are not alternatives to each other — they serve entirely different purposes.
-Many clusters run both: metrics-server for the Kubernetes metrics API, Prometheus for
-observability and as the backend for HPA custom metrics via the adapter.
-
----
-
-### 7. What Is a Metrics Adapter?
-
-A **metrics adapter** is a Kubernetes component (a Deployment) that:
-
-1. Implements `custom.metrics.k8s.io` and/or `external.metrics.k8s.io`
-2. Registers itself with the Kubernetes API server as an `APIService` for those groups
-3. Fetches values from a backend (Prometheus, CloudWatch, etc.) when queried by HPA
-4. Returns results in the format the HPA controller expects
-
-> **"Metrics adapter" is a role, not a product.** Any component implementing the API
-> contract fills this role. metrics-server is the built-in adapter for `metrics.k8s.io`;
-> there is no built-in adapter for the other two — you choose and install one.
-
-#### 7.1 How the Adapter Registers Itself
-
-```yaml
-apiVersion: apiregistration.k8s.io/v1
-kind: APIService
-metadata:
-  name: v1beta1.custom.metrics.k8s.io
-spec:
-  service:
-    name: prometheus-adapter
-    namespace: monitoring
-  group: custom.metrics.k8s.io
-  version: v1beta1
-  groupPriorityMinimum: 100
-  versionPriority: 100
-```
-
-Once registered, all requests to `/apis/custom.metrics.k8s.io/...` arriving at
-kube-apiserver are proxied to the adapter's Service. The HPA controller has no direct
-connection to the adapter — it always goes through kube-apiserver.
-
-#### 7.2 Available Adapter Implementations
-
-| Adapter | Backend | API Groups Covered | Cluster Support |
-|---|---|---|---|
-| **Prometheus Adapter** | Prometheus | `custom.metrics.k8s.io` + `external.metrics.k8s.io` | Any cluster |
-| **KEDA** | SQS, Kafka, Redis, Prometheus, HTTP, 50+ | `external.metrics.k8s.io` | Any cluster (scaler-dependent) |
-| **CloudWatch Metrics Adapter** | AWS CloudWatch | `external.metrics.k8s.io` | EKS / AWS only |
-| **Datadog Cluster Agent** | Datadog | `custom.metrics.k8s.io` + `external.metrics.k8s.io` | Any cluster (needs Datadog subscription) |
-
-#### 7.3 Adapter Ownership, Licensing, and Resources
-
-**Prometheus Adapter**
-- Maintained by the Kubernetes community under `kubernetes-sigs` (official Kubernetes
-  Special Interest Groups). Licensed Apache 2.0. Not tied to any company.
-- GitHub: https://github.com/kubernetes-sigs/prometheus-adapter
-- Helm: https://artifacthub.io/packages/helm/prometheus-community/prometheus-adapter
-
-**KEDA (Kubernetes Event-Driven Autoscaling)**
-- Originally created at Microsoft; donated to CNCF in 2020; reached CNCF **Graduated**
-  status August 2023. Primary sponsors: Microsoft Azure, Snyk, VexxHost. Apache 2.0.
-- Cloud-agnostic — runs on any Kubernetes cluster. Only specific scalers (e.g. SQS)
-  require cloud access; scalers like Kafka, Redis, Prometheus run on minikube.
-- Website: https://keda.sh | GitHub: https://github.com/kedacore/keda
-
-**CloudWatch Metrics Adapter**
-- Originally by AWS under `awslabs`. Now **archived** — no longer actively maintained.
-  For new AWS-based scaling, KEDA's built-in SQS/CloudWatch scalers are the recommended
-  active path.
-- GitHub (archived): https://github.com/amazon-archives/k8s-cloudwatch-adapter
-
-**Datadog Cluster Agent**
-- Developed and maintained by Datadog (commercial). Requires a Datadog subscription.
-  Not open source in the same sense as the others.
-- Docs: https://docs.datadoghq.com/containers/cluster_agent
-
----
-
-### 8. The HPA-Specific Metric Types and Which API Each Uses
-
-When the HPA controller processes a metric, the `type` field unconditionally determines
-which API group is queried. There is no configuration for this routing.
-
-```
-type: Resource          → queries metrics.k8s.io         (metrics-server)
-type: ContainerResource → queries metrics.k8s.io         (metrics-server)
-type: Pods              → queries custom.metrics.k8s.io  (adapter required)
-type: Object            → queries custom.metrics.k8s.io  (adapter required)
-type: External          → queries external.metrics.k8s.io (adapter required)
-```
-
-If the required API has no backend registered:
-- HPA metric status shows `<unknown>` permanently
-- HPA holds the current replica count (does not scale)
-- No error is thrown — the HPA silently waits
-
-#### 8.1 `Pods` Type — Per-Pod Custom Metric, Averaged
-
-HPA gets one value per pod from the adapter, averages them, compares to `averageValue`.
-
-```yaml
-metrics:
-  - type: Pods
-    pods:
-      metric:
-        name: requests_per_second
-      target:
-        type: AverageValue
-        averageValue: "1000"          # target 1000 req/s per pod (average)
-```
-
-API path queried:
-```
-GET /apis/custom.metrics.k8s.io/v1beta1/namespaces/{ns}/pods/*/{metric-name}
-```
-
-#### 8.2 `Object` Type — Single Value from One Kubernetes Object
-
-HPA gets one aggregate value for a named Kubernetes object (not per-pod). The object
-the metric belongs to (e.g. an Ingress) is usually different from the object being
-scaled (e.g. a backend Deployment).
-
-```yaml
-metrics:
-  - type: Object
-    object:
-      metric:
-        name: requests_per_second
-      describedObject:
-        apiVersion: networking.k8s.io/v1
-        kind: Ingress
-        name: main-ingress
-      target:
-        type: Value
-        value: "10000"                # TOTAL requests/s on the Ingress
-```
-
-API path queried:
-```
-GET /apis/custom.metrics.k8s.io/v1beta1/namespaces/{ns}/
-        ingresses.networking.k8s.io/main-ingress/requests_per_second
-```
-
-Note: the Ingress itself does not emit this metric. The nginx-ingress-controller
-Deployment does — Prometheus scrapes it, the adapter maps it to the Ingress object.
-
-#### 8.3 `External` Type — Metric With No Kubernetes Owner
-
-Used for signals from entirely outside the Kubernetes object model (SQS, Kafka, Redis,
-databases). There is no `describedObject` — only a label selector that the adapter
-interprets to identify which external resource to query.
-
-```yaml
-metrics:
-  - type: External
-    external:
-      metric:
-        name: sqs_queue_depth
-        selector:
-          matchLabels:
-            queue: orders
-      target:
-        type: AverageValue
-        averageValue: "30"            # target 30 messages per worker pod
-```
-
-API path queried:
-```
-GET /apis/external.metrics.k8s.io/v1beta1/namespaces/{ns}/
-        sqs_queue_depth?labelSelector=queue=orders
-```
-
----
-
-### 9. Prometheus and the Prometheus Adapter — The Relationship
-
-A common source of confusion: Prometheus and the Prometheus Adapter are two entirely
-separate components with different jobs.
-
-```
-Prometheus:
-  ├─ A time-series database and scraping engine
-  ├─ Scrapes /metrics endpoints from pods (Prometheus exposition format)
-  ├─ Stores time-series data with configurable retention
-  ├─ Exposes a PromQL HTTP query API (used by Grafana, alerting rules, etc.)
-  └─ Has NO knowledge of the Kubernetes Custom Metrics API
-
-Prometheus Adapter:
-  ├─ A separate Deployment in the cluster
-  ├─ Implements custom.metrics.k8s.io and external.metrics.k8s.io
-  ├─ Registered with kube-apiserver as an APIService
-  ├─ When HPA requests a metric:
-  │    1. Translates the request into a PromQL query
-  │    2. Runs that query against Prometheus (same HTTP API Grafana uses)
-  │    3. Returns the result in the Custom Metrics API format
-  └─ All mapping rules live in the adapter's ConfigMap — Prometheus needs zero changes
-```
-
-#### 9.1 Full Component Stack — Prometheus-backed HPA
-
-```
-Application Pods  →  /metrics endpoint (Prometheus format)
-        │
-        │  scrape every 15s
-        ▼
-Prometheus  →  stores time-series  →  Grafana (dashboards)
-        │
-        │  PromQL queries (same HTTP API)
-        ▼
-Prometheus Adapter  →  registered as APIService for custom.metrics.k8s.io
-        │
-        │  Custom Metrics API (via kube-apiserver proxy)
-        ▼
-HPA Controller  →  calculates desiredReplicas  →  updates Deployment
-```
-
-#### 9.2 Prometheus Adapter ConfigMap — How Rules Work
-
-```yaml
-rules:
-  - seriesQuery: 'http_requests_total{namespace!="",pod!=""}'
-    #  which Prometheus metric series this rule covers
-
-    resources:
-      overrides:
-        namespace: {resource: "namespace"}
-        pod:       {resource: "pod"}
-    #  maps Prometheus labels to Kubernetes resource names
-    #  so the adapter knows which pod/namespace the metric belongs to
-
-    name:
-      matches: "^(.*)_total$"
-      as: "${1}_per_second"
-    #  the Custom Metrics API name exposed to HPA
-    #  "http_requests_total" → "http_requests_per_second"
-
-    metricsQuery: 'sum(rate(<<.Series>>{<<.LabelMatchers>>}[2m])) by (<<.GroupBy>>)'
-    #  PromQL query run when HPA requests this metric
-    #  template variables filled by the adapter per request
-```
-
-#### 9.3 What Needs to Be Configured in Prometheus?
-
-**Nothing.** Prometheus only needs to already be scraping the relevant pods. The adapter
-reads from Prometheus using the standard PromQL HTTP API — the same way Grafana does.
-All mapping configuration lives in the adapter's ConfigMap, not in Prometheus.
-
-#### 9.4 Cluster Requirements
-
-| Component | Works On |
-|---|---|
-| metrics-server | Any cluster |
-| Prometheus + Prometheus Adapter | Any cluster — minikube, kind, EKS, GKE, AKS |
-| KEDA (core + Kafka/Redis/Prometheus scalers) | Any cluster |
-| KEDA SQS scaler | EKS or any cluster with AWS credentials |
-| CloudWatch Metrics Adapter (archived) | EKS or any cluster with AWS credentials |
-| Cluster Autoscaler | Cloud clusters only (EKS, GKE, AKS — needs cloud node API) |
-
----
-
-### 10. KEDA — Event-Driven Scaling and Scale-to-Zero
-
-KEDA (Kubernetes Event-Driven Autoscaling) fills the gap between native HPA and
-event-driven workloads. It is a CNCF Graduated project (not AWS/cloud-specific) that
-installs its own metrics adapter and extends HPA with two key capabilities:
-
-**1. Scale to zero** — native HPA requires `minReplicas ≥ 1`. KEDA can scale a
-Deployment to 0 replicas when there is no work, and from 0 when work arrives.
-
-**2. 50+ built-in scalers** — no need to configure a separate adapter per source.
-
-```
-KEDA architecture:
-  ScaledObject (CRD)  →  KEDA Operator  →  creates/manages an HPA
-  KEDA Metrics Server →  implements external.metrics.k8s.io
-  Scaler              →  polls the event source (SQS, Kafka, Redis, etc.)
-```
-
-KEDA does not replace HPA — it creates and manages HPA objects under the hood. The
-HPA still does the actual pod scaling; KEDA feeds it the metric values via its own
-adapter and handles the scale-to-zero logic that HPA cannot express.
-
-**Scaler cloud requirements:**
-
-| KEDA Scaler | Requires Cloud? | Works on Minikube? |
-|---|---|---|
-| SQS scaler | Yes — AWS credentials + SQS queue | No |
-| Kafka scaler | No | Yes |
-| Redis scaler | No | Yes |
-| Prometheus scaler | No | Yes |
-| Cron scaler | No | Yes |
-| HTTP scaler | No | Yes |
-
----
-
-### 11. Complete Comparison — All Three Scalers
-
-```
-┌──────────────┬──────────────────────┬──────────────────────┬─────────────────────┐
-│              │  HPA                 │  VPA                 │  CA                 │
-├──────────────┼──────────────────────┼──────────────────────┼─────────────────────┤
-│ Scales       │  Pod replica count   │  Pod CPU/mem         │  Node count         │
-│              │                      │  requests/limits     │                     │
-├──────────────┼──────────────────────┼──────────────────────┼─────────────────────┤
-│ Signal       │  Metric value vs     │  Observed CPU/mem    │  Pending pods       │
-│              │  target threshold    │  usage over time     │  (scheduler state)  │
-├──────────────┼──────────────────────┼──────────────────────┼─────────────────────┤
-│ Uses         │  metrics.k8s.io      │  metrics.k8s.io      │  None               │
-│ metrics API  │  custom.metrics.k8s  │  only                │                     │
-│              │  external.metrics.k8s│                      │                     │
-├──────────────┼──────────────────────┼──────────────────────┼─────────────────────┤
-│ Adapter      │  Required for Pods,  │  Not required        │  Not required       │
-│ needed?      │  Object, External    │                      │                     │
-│              │  types               │                      │                     │
-├──────────────┼──────────────────────┼──────────────────────┼─────────────────────┤
-│ Talks to     │  kube-apiserver      │  kube-apiserver      │  kube-apiserver     │
-│              │  (metrics APIs)      │  (metrics.k8s.io)    │  (pod scheduling)   │
-│              │                      │                      │  Cloud provider API │
-├──────────────┼──────────────────────┼──────────────────────┼─────────────────────┤
-│ Cloud        │  No                  │  No                  │  Yes — needs cloud  │
-│ required?    │                      │                      │  node provisioning  │
-├──────────────┼──────────────────────┼──────────────────────┼─────────────────────┤
-│ Minikube     │  Yes                 │  Yes                 │  No                 │
-│ compatible?  │                      │                      │                     │
-├──────────────┼──────────────────────┼──────────────────────┼─────────────────────┤
-│ Scale to     │  No (min 1 replica)  │  N/A                 │  N/A                │
-│ zero?        │  KEDA can            │                      │                     │
-├──────────────┼──────────────────────┼──────────────────────┼─────────────────────┤
-│ Safe to use  │  Yes, if HPA uses    │  Yes, if VPA manages │  Yes — CA reacts    │
-│ together?    │  custom/external     │  CPU/mem and HPA     │  to HPA/VPA output; │
-│              │  metrics (not CPU)   │  uses other metrics  │  no conflict        │
-└──────────────┴──────────────────────┴──────────────────────┴─────────────────────┘
-```
-
----
-
-### 12. Typical Conflict: HPA + VPA on the Same Deployment
-
-HPA and VPA should not both target **CPU or memory** on the same Deployment simultaneously.
-They will fight:
-- HPA adds replicas because average CPU is high
-- VPA increases CPU requests per pod
-- More CPU requested → pods are harder to schedule → CA adds nodes
-- VPA increasing requests may lower the CPU *utilisation percentage* → HPA scales back down
-- The loop repeats unpredictably
-
-**Safe combinations:**
-
-```
-HPA on CPU/memory + VPA on CPU/memory  →  conflict (do not use)
-
-HPA on custom metrics (req/s, queue)   →  safe (different signals, no conflict)
-+ VPA on CPU/memory
-
-HPA on anything + CA                   →  safe (CA just reacts to pending pods)
-
-VPA + CA                               →  safe (VPA changes requests, CA responds
-                                            to resulting scheduling pressure)
-
-All three (HPA custom + VPA + CA)      →  safe and recommended for production:
-                                            HPA: right pod count
-                                            VPA: right pod size
-                                            CA:  right node count
-```
-
----
-
-### 13. E2E Flows for Adapter-Dependent HPA Types
-
-The following flows show the complete chain for each HPA metric type that requires
-an adapter. Types `Resource` and `ContainerResource` (metrics-server, no adapter)
-are not included — those are covered in the `01-autoscaling` demo.
-
-#### 13.1 `Pods` Type — Prometheus Adapter
-
-```
-Application pods → expose /metrics (Prometheus format)
-        │ scrape every 15s
-        ▼
-Prometheus → stores http_requests_total time series per pod
-        │ PromQL
-        ▼
-Prometheus Adapter (ConfigMap rule):
-  seriesQuery:   http_requests_total{namespace!="",pod!=""}
-  name:          → requests_per_second
-  metricsQuery:  sum(rate(...[2m])) by (pod)
-        │ custom.metrics.k8s.io
-        ▼
-kube-apiserver proxies GET /apis/custom.metrics.k8s.io/v1beta1/
-  namespaces/default/pods/*/requests_per_second
-        │
-        ▼
-HPA Controller:
-  receives per-pod values [1200, 950, 800] req/s
-  average = 983, target = 1000 → no change
-  if average = 1500 → ceil[3 × (1500/1000)] = 5 replicas
-```
-
-#### 13.2 `Object` Type — Prometheus Adapter (Ingress example)
-
-```
-nginx-ingress-controller → exposes /metrics including
-  nginx_ingress_controller_requests_total{ingress="main-ingress"}
-        │ scrape
-        ▼
-Prometheus → stores the time series
-        │ PromQL
-        ▼
-Prometheus Adapter (ConfigMap rule):
-  seriesQuery:   nginx_ingress_controller_requests_total{ingress!=""}
-  resources:     ingress label → networking.k8s.io/ingresses object
-  name:          → requests_per_second
-  metricsQuery:  sum(rate(...[2m]))   ← ONE value, not per-pod
-        │ custom.metrics.k8s.io
-        ▼
-kube-apiserver proxies GET /apis/custom.metrics.k8s.io/v1beta1/
-  namespaces/default/ingresses.networking.k8s.io/main-ingress/requests_per_second
-        │
-        ▼
-HPA Controller:
-  receives ONE value: 12,000 req/s
-  target: 10,000 → ceil[3 × (12000/10000)] = 4 replicas
-
-  Note: Ingress total does not drop when you add pods.
-  Use target.type: AverageValue (not Value) to divide by pod count.
-```
-
-#### 13.3 `External` Type — KEDA SQS scaler (EKS)
-
-```
-AWS SQS queue "orders"
-  ApproximateNumberOfMessages = 900
-  CloudWatch records this automatically
-        │ CloudWatch API
-        ▼
-KEDA Metrics Server (in kube-system):
-  ScaledObject defines: SQS queue=orders, targetValue=30
-  KEDA polls SQS/CloudWatch every 30s
-        │ external.metrics.k8s.io
-        ▼
-kube-apiserver proxies GET /apis/external.metrics.k8s.io/v1beta1/
-  namespaces/default/sqs_queue_depth?labelSelector=queue=orders
-        │
-        ▼
-HPA Controller (created and managed by KEDA):
-  current = 900, target = 30 per pod, current pods = 5
-  desired = ceil[5 × (900/30)] = 150 → capped at maxReplicas
-
-  Queue drains to 0:
-  desired = 0 → KEDA scales to 0 (native HPA would floor at minReplicas=1)
-```
-
----
-
-### 14. Configuration Checklist — Prometheus Adapter Setup
-
-For HPA `Pods` or `Object` metrics backed by Prometheus:
-
-```
-□ 1. Application pods expose /metrics in Prometheus exposition format
-
-□ 2. Prometheus is scraping those pods
-     verify: port-forward to Prometheus UI → query the metric series
-
-□ 3. Prometheus Adapter installed and pointed at Prometheus service URL
-     helm: prometheus-community/prometheus-adapter
-
-□ 4. Adapter ConfigMap rule defines:
-     a. seriesQuery  — which Prometheus series this rule covers
-     b. resources    — maps Prometheus labels to Kubernetes resource names
-     c. name.as      — the Custom Metrics API name HPA will reference
-     d. metricsQuery — the PromQL query to run per HPA request
-
-□ 5. APIService registered and healthy:
-     kubectl get apiservices | grep custom.metrics
-     → v1beta1.custom.metrics.k8s.io ... True
-
-□ 6. Metric visible in the API:
-     kubectl get --raw /apis/custom.metrics.k8s.io/v1beta1/ | jq .
-
-□ 7. HPA metric name matches name.as in the adapter ConfigMap rule
-
-□ 8. HPA status shows a current value (not <unknown>):
-     kubectl describe hpa <name>
-```
-
----
-
-### Step 6 — Theory: Choosing an HPA Metric Type — Decision Framework
-
-> No cluster commands in this step — theory only.
 
 | Metric type | API served by | Requires adapter? | Scope | Typical use case |
 |---|---|---|---|---|
@@ -1296,7 +1311,7 @@ For HPA `Pods` or `Object` metrics backed by Prometheus:
 
 ---
 
-### Step 7 — Cleanup
+### Step 5 — Cleanup
 
 Steps 2 and 3 delete their own HPAs, but the Deployment and Service from Step 1 remain. Run this to return the cluster to its pre-lab state:
 
@@ -1337,7 +1352,7 @@ In this lab, you:
 - ✅ Explained the External Metrics API and metrics adapter architecture (Prometheus Adapter, CloudWatch adapter, KEDA)
 - ✅ Built a decision framework covering all five HPA metric types
 
-**Key Takeaway:** `Resource` and `ContainerResource` cover CPU/memory scaling with metrics-server alone — `ContainerResource` exists specifically to isolate one container's usage in a multi-container pod. `behavior` policies (`Pods` or `Percent`) are rate limiters on how fast the replica count moves toward the formula's desired value, never the scaling decision itself. Everything beyond CPU/memory — `Pods`, `Object`, `External` — requires a metrics adapter; hands-on adapter configuration lives in `aws-eks-demos`.
+**Key Takeaway:** `Resource` and `ContainerResource` cover CPU/memory scaling with metrics-server alone — `ContainerResource` exists specifically to isolate one container's usage in a multi-container pod. `behavior` policies (`Pods` or `Percent`) are rate limiters on how fast the replica count moves toward the formula's desired value, never the scaling decision itself. Everything beyond CPU/memory — `Pods`, `Object`, `External` — requires a metrics adapter; Prometheus-based adapter hands-on is in `11-auto-scaling/05-prometheus-adapter`, AWS-specific sources are in `aws-eks-demos`.
 
 ---
 
@@ -1628,7 +1643,7 @@ For `type: Resource`, every container in the pod must have `resources.requests.c
 | External Metrics API | `external.metrics.k8s.io` — backs the `External` HPA type, for metrics with no associated Kubernetes object (e.g. SQS queue depth). Also requires an adapter. |
 | `Pods` vs `Object` | `Pods`: per-pod metric, averaged across pods (like `Resource`'s shape). `Object`: single metric from one named Kubernetes object via `describedObject`, compared directly — no per-pod averaging. |
 | metrics-server scope | metrics-server only serves `metrics.k8s.io` (used by `Resource`/`ContainerResource`). It has no role in Custom or External Metrics APIs. |
-| Adapter examples | Prometheus Adapter (generic, PromQL-based), CloudWatch-based adapter or KEDA (AWS-native). Hands-on adapter setup covered in `aws-eks-demos`. |
+| Adapter examples | Prometheus Adapter (generic, PromQL-based) — hands-on in `11-auto-scaling/05-prometheus-adapter`. KEDA and CloudWatch-based adapters (AWS-native) — hands-on in `aws-eks-demos`. CloudWatch Metrics Adapter is archived; prefer KEDA SQS scaler for new AWS setups. |
 | Metric type decision order | Prefer `Resource`/`ContainerResource` (no extra components) for CPU/memory; reach for `Pods`/`Object`/`External` only when the signal is application-level or external. |
 | Scale-to-zero | `External`-type HPA cannot scale below `minReplicas: 1`. KEDA can scale to zero because it manages the scale-from-zero transition itself. |
 
@@ -1671,7 +1686,7 @@ kubectl describe hpa <name> | grep -A3 Conditions
 kubectl get apiservices | grep metrics
 # custom.metrics.k8s.io and external.metrics.k8s.io must be registered
 # by a metrics adapter. metrics-server alone does NOT serve these —
-# see Steps 4-5.
+# see ## Kubernetes Scaling — API & Adapter Reference in this README.
 ```
 
 **Two HPAs targeting the same Deployment:**
@@ -1712,7 +1727,7 @@ kubectl exec deploy/multi-container-app -c <container> -- which dd sh
 "What is the difference between the Pods and Object HPA metric types, given both use the Custom Metrics API?","Pods: per-pod custom metric averaged across all pods of the target — HPA divides total demand by per-pod target. Object: single metric read from one specific Kubernetes object (e.g. total Ingress request rate) compared directly against the target — no per-pod averaging.","02-hpa-advanced,custom-metrics-api,pods-object"
 "What is the External Metrics API, and give an example use case for the External HPA metric type.","external.metrics.k8s.io — an API group for metrics with NO associated Kubernetes object. Example: scaling a worker Deployment based on AWS SQS queue depth exposed via a metrics adapter.","02-hpa-advanced,external-metrics-api"
 "Does metrics-server have any role in serving the Custom Metrics API or External Metrics API?","No. metrics-server only serves metrics.k8s.io (used by Resource and ContainerResource). custom.metrics.k8s.io and external.metrics.k8s.io are served entirely by separately-installed metrics adapters.","02-hpa-advanced,custom-metrics-api,external-metrics-api,metrics-server"
-"Name two metrics adapter examples and where their hands-on setup is covered.","Prometheus Adapter (generic, PromQL-based) and a CloudWatch-based adapter or KEDA (AWS-native). Hands-on adapter configuration is covered in aws-eks-demos.","02-hpa-advanced,adapters,forward-reference"
+"Name two metrics adapter examples and where their hands-on setup is covered.","Prometheus Adapter (generic, PromQL-based) — hands-on in 11-auto-scaling/05-prometheus-adapter (minikube). KEDA and CloudWatch-based adapters (AWS-native) — hands-on in aws-eks-demos. Note: CloudWatch Metrics Adapter is archived; KEDA SQS scaler is the recommended replacement.","02-hpa-advanced,adapters,forward-reference"
 "Does ContainerResource require a custom metrics adapter like Pods/Object/External do?","No. ContainerResource, like Resource, is served by metrics-server alone. Only Pods, Object, and External require a separate adapter.","02-hpa-advanced,containerresource,metrics-server"
 "Which HPA metric type should you reach for first when scaling on CPU or memory, and why?","Resource (or ContainerResource if one container's usage should be isolated) — both work with metrics-server alone, no extra components. Reach for Pods/Object/External only when the scaling signal is application-level or external.","02-hpa-advanced,decision-framework"
 "A multi-container pod has app (web server) and sidecar (log shipping spikes). You want HPA to scale on web server load only. Which type and which field identifies the target container?","ContainerResource, with containerResource.container: app (plus name: cpu and a target block).","02-hpa-advanced,containerresource,syntax"
