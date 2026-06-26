@@ -1,18 +1,24 @@
 apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler
 metadata:
-  name: nginx-hpa-memory
+  name: nginx-hpa-multi
 spec:
   scaleTargetRef:
     apiVersion: apps/v1
     kind: Deployment
     name: nginx-deploy
   minReplicas: 1
-  maxReplicas: 5
+  maxReplicas: 10
   metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 50
     - type: Resource
       resource:
         name: memory
         target:
           type: Utilization
-          averageUtilization: 70   # scale out when average memory > 70%
+          averageUtilization: 70

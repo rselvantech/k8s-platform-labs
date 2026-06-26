@@ -1,18 +1,15 @@
-# Demo: 11-auto-scaling/01-autoscaling — HPA, VPA, and the Kubernetes Scaling Model
+# Demo: 11-auto-scaling/01-hpa-basic — HPA and the Kubernetes Horizontal Scaling Model
 
 ## Lab Overview
 
-Applications receive variable traffic throughout the day — fixed replica counts and static resource allocations either waste money during quiet periods or cause outages during peaks. Kubernetes autoscaling adjusts both the number of pods and their resource allocations automatically based on actual demand.
+Applications receive variable traffic throughout the day — fixed replica counts and static resource allocations either waste money during quiet periods or cause outages during peaks. Kubernetes autoscaling adjusts the number of pods automatically based on actual demand.
 
-This lab builds the complete mental model for Kubernetes autoscaling before any hands-on work begins. You will understand cAdvisor (where metrics originate), metrics-server (how metrics reach the control plane), the HPA controller (how scaling decisions are made), and VPA (how resource requests are right-sized over time). The hands-on steps then verify each concept with real numbers from a live cluster.
-**Real-world scenario:** A nginx-based web application that receives
-variable traffic. HPA handles traffic spikes by adding replicas. VPA
-right-sizes resource requests based on observed usage — preventing
-under-provisioning (OOMKill, throttling) and over-provisioning (waste).
+This lab builds the complete mental model for Kubernetes horizontal autoscaling before any hands-on work begins. You will understand cAdvisor (where metrics originate), metrics-server (how metrics reach the control plane), and the HPA controller (how scaling decisions are made). The hands-on steps then verify each concept with real numbers from a live cluster.
 
+**Real-world scenario:** A nginx-based web application receives variable traffic throughout the day. HPA handles traffic spikes by adding replicas, then scales back in during quiet periods — doing so gradually to avoid premature removal during transient lulls(i.e temporary short periods of reduced activity or calm).
 
 **What this lab covers:**
-- Types of scaling in Kubernetes — HPA, VPA, Cluster Autoscaler — what each does, when each applies, who builds and maintains each
+- Types of scaling in Kubernetes — HPA, VPA, Cluster Autoscaler — what each does, when each applies, who builds and maintains each 
 - cAdvisor — what it is, how it reads from cgroups vs /proc, how long it retains data
 - metrics-server — architecture, the Metrics API, what "cluster addon" means, storage model
 - HPA architecture — the full pipeline from container runtime to HPA controller
@@ -21,16 +18,10 @@ under-provisioning (OOMKill, throttling) and over-provisioning (waste).
 - HPA metric types — Resource, ContainerResource, Pods, Object, External — the full pipeline for each
 - HPA scaling algorithm — formula, tolerance, multiple metrics MAX rule
 - Scale-down stabilisation — why pods stay up after load drops
-- HPA behaviour — custom scale-up/down policies and windows
+- HPA behaviour — custom scale-up/down policies, windows, and selectPolicy
 - Why HPA does not use the Eviction API and what that means for PDB
-- VPA installation — three components and how they work together — who maintains VPA
-- VPA algorithm — inputs, histogram model, output fields (Target, Lower Bound, Upper Bound, Uncapped Target)
-- VPA update modes — Off, Initial, Recreate, InPlaceOrRecreate
-- VPA per-container recommendations and containerPolicies
-- What VPA can and cannot target — standalone pod vs single-pod app distinction
-- VPA CRDs — VerticalPodAutoscaler and VerticalPodAutoscalerCheckpoint
-- HPA + VPA conflict — safe and unsafe combinations
-- Complete field reference for both HPA and VPA with field-level explanations
+
+> **Scope note:** This lab covers HPA fundamentals hands-on (Steps 1–8). VPA installation, algorithm, update modes, and hands-on are in `03-vpa-fundamentals`. Cluster Autoscaler requires cloud infrastructure and is covered in `aws-eks-demos`. Custom/external metrics adapter hands-on is in `05-prometheus-adapter` (minikube) and `aws-eks-demos` (AWS-specific sources).
 
 ---
 
@@ -40,7 +31,6 @@ under-provisioning (OOMKill, throttling) and over-provisioning (waste).
 - Minikube `3node` profile — 1 control plane + 2 workers
 - kubectl installed and configured
 - metrics-server enabled (required by both HPA and VPA)
-- git (for VPA installation — Steps 9+)
 
 **Verify metrics-server before starting:**
 ```bash
@@ -49,10 +39,16 @@ kubectl top nodes
 # Both must work before proceeding
 ```
 
+If metrics-server is not running:
+```bash
+minikube addons enable metrics-server -p 3node
+# Wait ~60 seconds, then verify again
+```
+
 **Knowledge Requirements:**
 - **REQUIRED:** Completion of `06-pod-scheduling/06-resource-management` — resource requests/limits, cgroups enforcement, QoS classes (mandatory for HPA utilisation calculations)
 - **REQUIRED:** Understanding of Deployments and replica management
-- **RECOMMENDED:** Understanding of QoS classes (helpful for VPA eviction behaviour)
+- **RECOMMENDED:** Understanding of QoS classes (helpful for understanding HPA interaction with pod scheduling)
 
 ---
 
@@ -67,31 +63,23 @@ By the end of this lab, you will be able to:
 6. ✅ Apply the HPA scaling formula and verify with real numbers
 7. ✅ Explain why HPA does not use the Eviction API and what this means for PDB
 8. ✅ Create HPA v2 with CPU-based, memory-based, and multiple-metric scaling and observe scale-up/down
-9. ✅ Configure custom HPA behaviour — stabilisation windows and policies
+9. ✅ Configure custom HPA behaviour — stabilisation windows, policies, and selectPolicy
 10. ✅ Explain the difference between all five HPA metric types and which metrics pipeline each uses
-11. ✅ Install VPA and explain all three components and who maintains the project
-12. ✅ Explain the VPA algorithm — inputs, histogram model, and all recommendation output fields
-13. ✅ Use VPA Off mode to get resource recommendations without pod changes
-14. ✅ Use VPA Recreate mode and observe automatic resource adjustment
-15. ✅ Explain HPA + VPA conflict and identify safe combinations
 
 ---
 
 ## Directory Structure
 
 ```
-11-auto-scaling/01-autoscaling/
+11-auto-scaling/01-hpa-basic/
 ├── README.md                        # this file
 └── src/
-    ├── nginx-deploy.yaml            # nginx deployment + ClusterIP service
-    ├── load-generator.yaml          # busybox load generator
-    ├── hpa-cpu-v2.yaml              # HPA v2 — CPU based
-    ├── hpa-memory-v2.yaml           # HPA v2 — memory based
-    ├── hpa-multi-metric.yaml        # HPA v2 — CPU + memory
-    ├── hpa-behaviour.yaml           # HPA v2 — custom scale-down behaviour
-    ├── vpa-off.yaml                 # VPA Off mode — recommendations only
-    ├── vpa-recreate.yaml            # VPA Recreate mode — auto resource update
-    └── vpa-conflict.yaml            # VPA + HPA conflict demo
+    ├── 01-nginx-deploy.yaml         # nginx deployment + ClusterIP service
+    ├── 02-load-generator.yaml       # busybox load generator
+    ├── 03-hpa-cpu-v2.yaml           # HPA v2 — CPU based
+    ├── 04-hpa-memory-v2.yaml        # HPA v2 — memory based
+    ├── 05-hpa-multi-metric.yaml     # HPA v2 — CPU + memory
+    └── 06-hpa-behaviour.yaml        # HPA v2 — custom scale-down behaviour
 ```
 
 ---
@@ -125,6 +113,7 @@ VPA — Vertical Pod Autoscaler
   Maintained by: Kubernetes SIG Autoscaling — lives in the
                  kubernetes/autoscaler GitHub repository (separate from
                  core Kubernetes, but same SIG ownership)
+  Hands-on:      03-vpa-fundamentals
 
 CA — Cluster Autoscaler
   What it does:  adds or removes NODES from the cluster
@@ -143,31 +132,55 @@ CA — Cluster Autoscaler
                  that repo. CA can integrate with any cloud provider
                  that has contributed a plugin (AWS, GCP, Azure,
                  DigitalOcean, OpenStack, and others).
+  Hands-on:      aws-eks-demos
 ```
 
 **What is resource mis-sizing (VPA trigger)?**
 
-When you write a Kubernetes manifest you must set `resources.requests.cpu` and `resources.requests.memory` for each container. These values are guesses — you may guess too low, too high, or correctly:
+Resource mis-sizing is the condition where `resources.requests` in a container spec does
+not reflect the container's actual CPU or memory usage. It has nothing to do with traffic
+spikes — it is a static configuration error that persists whether or not there is load.
+
+When you write a Kubernetes manifest you must set `resources.requests.cpu` and
+`resources.requests.memory` for each container. These values are guesses:
 
 ```
-Under-provisioned (too little):
-  requests.cpu: 50m   ← but the container actually needs 300m
+Under-provisioned (request too low):
+  requests.cpu: 50m   ← but the container actually needs 300m at normal load
   Effect: CPU throttling (performance degradation), or OOMKill if memory
-  HPA consequence: HPA sees utilisation% = usage/request = 300/50 = 600%
-                   → triggers aggressive scaling even when a bigger
-                     request would have solved the problem alone
+  HPA impact: HPA sees utilisation% = usage/request = 300/50 = 600%
+              → HPA scales out aggressively, adding pods that are all equally
+                under-provisioned — the problem multiplies, not solves
 
-Over-provisioned (too much):
-  requests.cpu: 2000m ← but the container actually uses 100m
-  Effect: node capacity wasted, fewer pods can schedule, higher cost
-  HPA consequence: HPA sees utilisation% = 100/2000 = 5%
-                   → never scales up, even under real load
+Over-provisioned (request too high):
+  requests.cpu: 2000m ← but the container actually uses 100m at peak
+  Effect: node capacity wasted; fewer pods can schedule; higher cost
+  HPA impact: HPA sees utilisation% = 100/2000 = 5%
+              → HPA never scales up; the cluster appears to have headroom
+                even under real load
 
-VPA's job: observe actual usage over time, then tell you (or set)
-           the requests that reflect reality — this is "right-sizing"
+VPA's job: observe actual usage over time → recommend or set the correct request
+           This is "right-sizing" — matching the request to reality
 ```
 
 Right-sizing means setting resource requests that accurately reflect a container's actual observed usage — not too high (waste), not too low (throttling/OOMKill). VPA automates this by building a statistical model of observed usage and producing recommendations based on percentile-based targets.
+
+**Why HPA alone cannot fix mis-sizing:**
+
+HPA changes the number of pods, not the size of each pod. If every pod is under-provisioned
+(requests too low), scaling out adds more under-provisioned pods — you get more throttled
+pods, not more capacity. The correct fix is to raise the request (VPA's job), which then
+makes the HPA formula more accurate.
+
+**Why VPA alone cannot fix traffic spikes:**
+
+VPA changes the request per pod, not the number of pods. A correctly-sized pod that receives
+10× its normal traffic still needs more pods — not a bigger request. VPA's histogram model
+is not designed to respond to sudden traffic changes; it smooths over days of data.
+
+**How Kubernetes "decides":** it does not. You configure both:
+- HPA for traffic-driven replica count changes (fast)
+- VPA for resource right-sizing (slow — Off mode is safe to run alongside HPA)
 
 **Why HPA is best for stateless workloads:**
 
@@ -184,7 +197,7 @@ Stateful workloads — databases, message queues, caches — have properties tha
 - Adding replicas requires coordination — you cannot just double the replica count and have twice the write capacity.
 - Data may be pinned to a specific pod's local storage.
 
-For these workloads, the correct lever is not "add more pods" but "give the existing pod the resources it needs." That is exactly what VPA does.
+For these workloads, the correct lever is not "add more pods" but "give the existing pod the resources it needs." That is exactly what VPA does. Full VPA hands-on is in `03-vpa-fundamentals`.
 
 **Why VPA is best for single-pod apps (not multi-pod):**
 
@@ -199,11 +212,57 @@ With multiple replicas, VPA respects PDB and evicts pods one at a time, maintain
 
 A standalone pod (not managed by a Deployment, StatefulSet, or other controller) cannot be recreated after eviction — when the VPA Updater evicts it, it is gone permanently. There is no controller watching it to recreate it. VPA requires a controller to recreate evicted pods; without one, Recreate mode would just delete your pod. Even for a single-pod application, use a Deployment with `replicas: 1` — VPA will then evict and the Deployment controller will recreate it with updated resources.
 
+**Single-pod stateful app → VPA is the correct tool:**
+
+A single-pod stateful application is something like a Redis cache, a single-node database,
+or a message broker where you run exactly one instance (not for HA — just for the workload).
+Adding a second pod does not give you twice the capacity for these workloads; it gives you
+two independent instances that don't share state.
+
+```
+Real example: a Redis cache for session data
+  You cannot add a second Redis pod and have it automatically serve the same data
+  unless you configure Redis replication — which is a separate operational concern.
+
+  With VPA in Recreate mode:
+    Redis starts with requests.cpu=500m, requests.memory=256Mi (guesses)
+    VPA observes: actual peak = 120m CPU, 400Mi memory
+    VPA evicts the pod → controller recreates → Admission Controller injects:
+      requests.cpu=120m, requests.memory=400Mi
+    Redis restarts with right-sized resources — brief downtime (seconds)
+    Result: more accurate scheduling, prevents OOMKill from under-sized memory request
+```
+
+**Multi-replica stateful app → VPA in Off mode; operator-managed scaling for replicas:**
+
+A multi-replica stateful app is something like a Kafka cluster, a Cassandra ring, or
+PostgreSQL with a primary + read replicas. Scaling replicas is not a simple `kubectl scale`
+operation — it requires rebalancing partitions, joining the cluster, promoting replicas,
+etc. This is managed by a Kubernetes operator (e.g. Strimzi for Kafka, CloudNativePG for
+Postgres).
+
+```
+Real example: a 3-node Kafka cluster managed by Strimzi operator
+  Adding a 4th broker requires: partition reassignment, rebalancing topic replicas
+  Strimzi handles this → NOT HPA territory
+
+  VPA in Off mode (safe alongside operator):
+    Strimzi manages replica count (3 brokers is the right count, not variable)
+    VPA observes each broker's CPU/memory usage over days
+    VPA recommendation: increase broker memory request from 1Gi to 2.5Gi
+    Operator applies the change during next rolling restart
+    Result: better resource allocation without disrupting cluster operations
+```
+
+The distinction: HPA or an operator handles "how many replicas"; VPA handles
+"how big is each replica". For stateful apps, VPA in Off mode gives you the sizing
+data to inform manual or operator-managed changes safely.
+
 **Scale-down behaviour — all three autoscalers:**
 
 ```
 HPA scale-down:
-  Trigger:   metric drops below target × (1 - tolerance)
+  Trigger:   metric drops below target x (1 - tolerance)
   Mechanism: default 5-minute stabilisation window
              → records all recommended replica counts over last 5 min
              → only scales down to the HIGHEST recommendation seen
@@ -218,40 +277,117 @@ VPA scale-down (reducing requests):
              → Admission Controller injects lower requests on restart
   Timing:    depends on Updater polling interval and PDB constraints
   Action:    pod is evicted → controller recreates → admission injects lower requests
+  Full detail: 03-vpa-fundamentals
 
 CA scale-down (removing nodes):
   Trigger:   node has been underutilised for 10 minutes (configurable)
              AND all pods on it could fit on other nodes
-  Mechanism: drains pods (uses Eviction API → respects PDB)
-             → calls cloud provider API to terminate the VM
+  Mechanism: CA drains the NODE (not individual pods)
+             Draining a node means: CA evicts all pods on that node
+             using the Eviction API (respects PDB for each pod)
+             Once all pods are evicted → CA calls cloud provider API to terminate the VM
   Action:    pods reschedule to other nodes, VM is terminated
+
+  "Draining a node" vs "evicting a pod":
+    Draining: an operation on the node — marks it unschedulable (cordon) then
+              evicts all pods running on it one by one
+    Evicting:  an operation on a single pod — uses the Eviction API, which
+               checks PDB before proceeding
+    CA drains the node → which triggers eviction of each pod on it
+    The distinction matters: PDB is respected per-pod during the drain,
+    so a node drain that would violate a PDB for any pod on that node
+    will be blocked until PDB permits it
 ```
 
-**How the three work together:**
+**How the three work together — and when VPA activates:**
 
 ```
-Traffic spike arrives:
+Traffic spike arrives (HPA responds — seconds to minutes):
   1. More requests → per-pod CPU rises above HPA target
-  2. HPA scales out → new pods created
-
+  2. HPA formula: ceil[currentReplicas × (currentCPU/target)] → adds pods
   3. New pods cannot schedule (all nodes full)
-  4. Cluster Autoscaler detects Pending pods
-  5. CA calls AWS/GCP/Azure API → provisions new node
-  6. New pods schedule on new node
+  4. Cluster Autoscaler detects Pending pods → provisions new node
+  5. New pods schedule on new node → traffic load distributed
 
-Over time (with VPA in Off or Recreate mode):
-  4. VPA Recommender observes actual CPU/memory per container
-  5. VPA adjusts requests to match real usage (right-sizing)
-  6. Better-sized requests → more accurate HPA calculations
-
-Why step 6 matters:
-  HPA formula: desiredReplicas = ceil[currentReplicas × (usage / request)]
-  If request is inflated (over-provisioned):
-    usage=300m, request=2000m → utilisation=15% → HPA never scales up
-  If request is correct (right-sized by VPA):
-    usage=300m, request=350m → utilisation=86% → HPA scales appropriately
-  VPA right-sizing makes HPA's signal more accurate
+VPA operates on a completely different timescale (hours to days):
+  6. VPA Recommender has been observing CPU/memory usage since deployment
+  7. Over days, VPA builds a histogram: 90th percentile usage = 143m CPU
+  8. VPA recommendation: raise requests from 100m to 143m (if Recreate mode)
+     OR simply reports this (if Off mode)
 ```
+
+**Why step 6–8 are NOT triggered by the traffic spike in step 1:**
+
+VPA uses a histogram smoothed over days with recency decay. A single traffic spike
+adds a few high-usage samples to the histogram but does not immediately change the
+90th percentile significantly — the spike must be representative of sustained usage
+to shift the recommendation. VPA is not a real-time responder; it is a long-term
+capacity planner.
+
+**Why VPA right-sizing improves HPA accuracy:**
+
+```
+HPA formula: desiredReplicas = ceil[currentReplicas × (usage / request)]
+
+Before VPA right-sizing (request over-provisioned):
+  actual usage = 80m, request = 500m → utilisation = 16%
+  → HPA never scales up even if the application is slow
+  → The denominator (request) is too large; signal is muted
+
+After VPA right-sizing (request matches actual 90th pct):
+  actual usage = 80m, request = 90m → utilisation = 89%
+  → HPA scales up when the application is actually under load
+  → The denominator (request) reflects reality; signal is accurate
+```
+
+The practical takeaway: run VPA in Off mode first to establish correct requests.
+Once requests are right-sized, HPA's utilisation formula becomes meaningful.
+Then optionally enable VPA Recreate to keep requests right-sized automatically.
+
+**How does Kubernetes decide which autoscaler to trigger — HPA or VPA?**
+
+It does not. HPA and VPA are independent systems that do not communicate with each other
+and do not "decide" between themselves. Each watches different signals and acts on them
+independently. You — the operator — configure which one applies to a given workload.
+
+```
+HPA watches: a metric value vs a target threshold
+             (CPU%, memory%, custom metric, external metric)
+             When the metric exceeds the target → HPA adds pods
+             When the metric falls below the target → HPA removes pods
+
+VPA watches: the gap between observed resource usage and configured requests
+             (actual CPU used vs cpu request, actual memory used vs memory request)
+             When actual usage consistently exceeds the request → VPA raises the request
+             When actual usage is consistently well below the request → VPA lowers it
+```
+
+**Real-world example — the same pod, two different signals:**
+
+```
+Application: nginx web server
+resources.requests.cpu: 100m
+Load pattern: traffic spike at 9am, quiet from 10pm–8am
+
+HPA perspective:
+  9am: CPU rises to 180m = 180% of 100m request → above 50% target
+  HPA formula: ceil[1 × (180/50)] = 4 pods → scales out
+  10pm: traffic drops → CPU falls → HPA scales back in
+
+VPA perspective (running in Off mode alongside HPA):
+  Over 8 days: VPA histogram shows 90th percentile usage = 85m
+  VPA Target: cpu=85m (vs current request of 100m → over-provisioned)
+  VPA recommendation: lower requests to 85m to reclaim wasted capacity
+
+Neither autoscaler "triggers" the other. They run in parallel:
+  HPA handles the traffic spike → adds temporary pods
+  VPA handles the baseline right-sizing → corrects the long-term request value
+```
+
+The practical rule: **HPA responds to traffic changes (fast, seconds to minutes)**;
+**VPA responds to systematic mis-sizing (slow, hours to days)**. If you see high CPU
+utilisation and HPA is scaling out pods, that is expected — HPA is doing its job. Whether
+the requests were right to begin with is VPA's question, answered over a longer timeframe.
 
 ---
 
@@ -302,13 +438,13 @@ The cgroup filesystem is at `/sys/fs/cgroup/` on modern Linux systems (cgroups v
 cAdvisor does not store data at all — it is a live reader. Every time metrics-server calls the kubelet's `/metrics/resource` endpoint, cAdvisor reads current cgroup values and returns them. There is no historical buffer, no rolling window, no time series in cAdvisor itself. If you need historical data, you need a separate time-series database (Prometheus, Grafana) that regularly scrapes cAdvisor's Prometheus endpoint and stores the samples.
 
 ```
-cAdvisor retention:     NONE — current snapshot only
-metrics-server:         1 data point (most recent) — not a time series
+cAdvisor retention:       NONE — current snapshot only
+metrics-server:           1 data point (most recent) — not a time series
 Prometheus (if deployed): configurable — default 15 days
 VPA Recommender:        maintains its own histogram (in VPACheckpoint)
                         across multiple metrics-server snapshots
                         default observation window: 8 days
-                        (configurable via --history-length flag)
+                        (configurable via --history-length flag).see 03-vpa-fundamentals
 ```
 
 ---
@@ -364,13 +500,54 @@ Kubernetes API server (kube-apiserver)
 
 metrics-server registers itself as an API extension using an `APIService` object. This is how `kubectl top` works — it calls `kube-apiserver` at `/apis/metrics.k8s.io/v1beta1/nodes` or `/apis/metrics.k8s.io/v1beta1/pods`, and `kube-apiserver` proxies the request to the metrics-server service.
 
+
+**The Metrics API resource types — NodeMetrics and PodMetrics:**
+
 ```bash
-kubectl get apiservices | grep metrics
-# Expected output:
-# v1beta1.metrics.k8s.io   kube-system/metrics-server   True   5m
-#                                                         ↑
-#                           True = metrics-server is reachable and serving
+kubectl api-resources | grep metrics
+# nodes  metrics.k8s.io/v1beta1  false  NodeMetrics
+# pods   metrics.k8s.io/v1beta1  true   PodMetrics
 ```
+
+These are the two resource kinds that metrics-server exposes via the Metrics API:
+
+```
+NodeMetrics (namespaced: false — cluster-scoped):
+  Represents the CPU and memory usage of a Node at a point in time.
+  One NodeMetrics object per node in the cluster.
+  Queried by: kubectl top nodes
+  API path: /apis/metrics.k8s.io/v1beta1/nodes/<node-name>
+  Contains: CPU usage (nanocores), memory working set (bytes), timestamp
+
+PodMetrics (namespaced: true — namespace-scoped):
+  Represents the CPU and memory usage of all containers in a Pod at a point in time.
+  One PodMetrics object per running pod.
+  Queried by: kubectl top pods
+  API path: /apis/metrics.k8s.io/v1beta1/namespaces/<ns>/pods/<pod-name>
+  Contains: per-container CPU and memory usage, timestamp
+
+  Note: PodMetrics includes per-container breakdown — this is the same data
+  that HPA uses for type: Resource and type: ContainerResource calculations.
+  The HPA controller reads PodMetrics, not NodeMetrics.
+```
+
+**How to query them directly:**
+
+```bash
+# Get all node metrics
+kubectl get --raw /apis/metrics.k8s.io/v1beta1/nodes | python3 -m json.tool
+
+# Get all pod metrics in default namespace
+kubectl get --raw /apis/metrics.k8s.io/v1beta1/namespaces/default/pods \
+  | python3 -m json.tool
+
+# Same data that kubectl top shows — just the raw API response
+```
+
+These are not stored CRDs you create — they are API resources whose values are
+served live by metrics-server (from cAdvisor data). There are no `etcd` entries
+for NodeMetrics or PodMetrics; each request returns a fresh read from metrics-server's
+in-memory store.
 
 **How long metrics-server stores data:**
 
@@ -382,6 +559,43 @@ metrics-server retention:  1 sample per pod/container (most recent)
                            no historical data, no time series
                            restarting metrics-server clears all data
 ```
+
+**cAdvisor → metrics-server: what aggregates what?**
+
+cAdvisor provides metrics at the **container level** — one set of values per container
+in each pod on that node. It does not aggregate to pod level; it simply exposes raw
+per-container data.
+
+metrics-server reads the per-container data from every node's `/metrics/resource`
+endpoint (where cAdvisor data is served) and:
+
+```
+Aggregates UP to pod level:
+  Pod CPU = sum of all container CPU values in that pod
+  Pod memory = sum of all container memory values in that pod
+  (This is what kubectl top pods shows)
+
+Aggregates UP to node level:
+  Node CPU = sum of all pod CPU values on that node (plus system overhead)
+  Node memory = sum of all pod memory values on that node
+  (This is what kubectl top nodes shows)
+
+Keeps container-level breakdown available:
+  PodMetrics contains per-container breakdown
+  This is what HPA ContainerResource type reads
+  This is what kubectl top pod --containers shows
+```
+
+So the data flow is:
+
+```
+cAdvisor (per container) → metrics-server reads →
+  stores as PodMetrics (per container, aggregated per pod)
+  stores as NodeMetrics (aggregated per node)
+```
+
+metrics-server does NOT receive pre-aggregated data from cAdvisor — it receives
+raw per-container values and does the aggregation itself.
 
 **What metrics-server does NOT provide:**
 ```
@@ -406,7 +620,31 @@ kubectl top nodes
 kubectl top pods -A
 ```
 
-> The values returned by `kubectl top` may differ from OS tools like `top` or `htop`. This is expected — metrics-server is optimised for stable autoscaling signals, not for real-time accuracy. In particular, memory reports "working set" (active memory minus recently-used-but-releasable cache), not RSS. This produces a more meaningful signal for HPA decisions than raw RSS.
+> **Working set vs RSS — why kubectl top differs from OS tools:**
+>
+> `kubectl top` reports memory as **working set**, not RSS (Resident Set Size).
+>
+> **RSS (Resident Set Size):** all physical memory pages currently mapped to the process,
+> including pages that are in active use AND pages that were recently used but could be
+> released to other processes if memory pressure increases (e.g. file-backed pages,
+> shared libraries). RSS overstates actual "committed" memory.
+>
+> **Working set:** the subset of RSS that is actually in active use and cannot be readily
+> reclaimed without causing performance degradation. In Kubernetes, it is defined as:
+> ```
+> working set = RSS - recently-used-but-releasable file cache
+>             = the memory the container genuinely needs right now
+> ```
+>
+> **Why working set is better for HPA decisions:**
+>
+> An HPA based on RSS might see memory "in use" that is actually idle file cache that
+> the kernel would release the moment another pod needs the memory. This could trigger
+> unnecessary scale-out. Working set represents memory that is genuinely committed —
+> if it exceeds the request, the container truly needs more memory. This makes working
+> set a more meaningful signal for both HPA scaling decisions and OOMKill prevention
+> (OOMKill is triggered based on working set, not RSS).
+
 
 ---
 
@@ -424,8 +662,11 @@ cAdvisor (embedded in kubelet on each node)
         v
 kubelet /metrics/resource endpoint
         | lightweight HTTP endpoint per node
-        | exposes ResourceMetricsList for all pods on this node
-        v
+        | exposes ResourceMetricsList — one entry per CONTAINER (not per pod)
+        | each entry contains: container name, pod name, namespace,
+        |   CPU usage in nanocores, memory working set in bytes, timestamp
+        | metrics-server reads this and aggregates per-pod and per-node
+        | the per-container breakdown is preserved in PodMetrics for ContainerResource HPA
 metrics-server (Deployment in kube-system)
         | scrapes every kubelet every 60 seconds
         | aggregates across all nodes into in-memory store
@@ -712,6 +953,43 @@ Events:
     → Or: resources.requests not set on all containers
 ```
 
+**Reading the Conditions block at a glance:**
+
+The three conditions form a state machine. Read them in order:
+
+```
+Step 1: Is ScalingActive True?
+  → No (False):  HPA cannot calculate replicas at all.
+                 The metric pipeline is broken.
+                 Check: metrics-server running? resources.requests set?
+                 Fix the metrics problem first — nothing else matters yet.
+  → Yes (True):  HPA has a valid metric and can calculate. Move to step 2.
+
+Step 2: Is AbleToScale True?
+  → No (False):  HPA has a calculation but is in a cooldown/backoff window.
+                 BackoffBoth: just scaled, waiting for stability
+                 BackoffDownscale: in scale-down stabilisation window (normal after load drops)
+                 BackoffUpscale: in scale-up stabilisation (unusual — check behavior config)
+                 This is often EXPECTED behaviour, not an error. Wait for the window to clear.
+  → Yes (True):  HPA is ready to act on its calculation. Move to step 3.
+
+Step 3: Is ScalingLimited True?
+  → No (False):  Desired replicas is within [minReplicas, maxReplicas]. HPA is scaling freely.
+  → Yes (True):  Desired replicas hit a bound.
+                 TooFewReplicas: at minReplicas floor — cannot scale down further (correct)
+                 TooManyReplicas: at maxReplicas ceiling — cannot scale up further
+                   → this is EXPECTED when load exceeds capacity
+                   → if unexpected: raise maxReplicas
+```
+
+**AbleToScale True means:** "I am not in a cooldown period — I am allowed to act on my
+calculation right now." AbleToScale False does NOT mean something is broken — it usually
+means HPA recently scaled and is respecting a stabilisation window.
+
+**The most important condition for troubleshooting:** `ScalingActive`. If it is False, HPA
+is completely non-functional regardless of what the other conditions say. Fix the metric
+source first.
+
 ---
 
 ### HPA Metric Types — The Full Metrics Pipeline for Each
@@ -719,10 +997,10 @@ Events:
 The five HPA metric types use different data sources and require different infrastructure. Understanding WHICH pipeline each type uses determines how complex your setup needs to be.
 
 ```
-API Group              Served by          HPA metric types using it
-metrics.k8s.io       → metrics-server  → Resource, ContainerResource
-custom.metrics.k8s.io → metrics adapter → Pods, Object
-external.metrics.k8s.io → metrics adapter → External
+API Group                 Served by             HPA metric types using it
+metrics.k8s.io          → metrics-server       → Resource, ContainerResource
+custom.metrics.k8s.io   → metrics adapter      → Pods, Object
+external.metrics.k8s.io → metrics adapter      → External
 ```
 
 **Valid target types per metric type:**
@@ -795,6 +1073,7 @@ Why Pods and not Object?
   HPA averages across all pods. Adding a pod adds capacity linearly.
   Object would read a single total value from one Kubernetes object —
   wrong shape for a per-pod throughput metric.
+Hands-on: 05-prometheus-adapter (minikube)
 ```
 
 **Type: Object** — requires custom metrics adapter
@@ -815,6 +1094,7 @@ Why Object and not Pods?
   HPA compares that single total value against the target.
   Pods type would try to read the metric from each backend pod,
   which does not apply here — the metric source is the Ingress itself.
+Hands-on: 05-prometheus-adapter (minikube)
 ```
 
 **Type: External** — requires external metrics adapter
@@ -840,6 +1120,7 @@ Why External and not Object?
 Why External and not Pods?
   Queue depth is not a per-pod metric — it is a property of the
   external queue itself. There is one queue, not one queue per pod.
+Hands-on: aws-eks-demos
 ```
 
 **Custom metrics adapter vs external metrics adapter — the distinction:**
@@ -863,12 +1144,9 @@ Note: in practice, many adapters implement BOTH APIs.
                       and External types from one installation.
   KEDA: its own controller + adapter — implements external.metrics.k8s.io
         and supports scale-to-zero (HPA minReplicas ≥ 1, KEDA can go to 0)
-
-Hands-on for these types: see 02-hpa-advanced Steps 4–6 (theory) and
-aws-eks-demos (practical with Prometheus Adapter / CloudWatch adapter)
 ```
 
-> Types Pods, Object, and External require a metrics adapter installed in the cluster. This demo covers Resource and ContainerResource (built-in with metrics-server only).
+> Types Pods, Object, and External require a metrics adapter. This demo covers Resource only. ContainerResource is in `02-hpa-advanced`. Adapter hands-on is in `05-prometheus-adapter` and `aws-eks-demos`.
 
 ---
 
@@ -999,9 +1277,9 @@ spec:
 | `metrics[].type` | — | Which metrics pipeline to use | Using `Pods`/`Object`/`External` without installing an adapter |
 | `metrics[].resource.target.type` | — | `Utilization` (% of request) or `AverageValue` (raw) | Using `Utilization` without `resources.requests` set on all containers |
 | `metrics[].pods.target.type` | — | Must be `AverageValue` — only valid option | Using `Utilization` or `Value` with Pods type — invalid |
-| `metrics[].object.target.type` | — | `Value` (raw total) or `AverageValue` (÷ pod count) | Using `Value` when you want per-pod scaling — use `AverageValue` instead |
+| `metrics[].object.target.type` | — | `Value` (raw total) or `AverageValue` (÷ pod count) | Using `Value` when the Ingress total never drops as pods scale — use `AverageValue` |
 | `metrics[].external.target.type` | — | `Value` (raw total) or `AverageValue` (÷ pod count) | Same as Object — choose based on whether metric is a total or per-pod signal |
-| `behavior.scaleUp.stabilizationWindowSeconds` | 0 | How long HPA waits before acting on scale-up | Setting this to 300 (scale-down default) silently delays scale-up |
+| `behavior.scaleUp.stabilizationWindowSeconds` | 0 | How long HPA waits before acting on scale-up | Setting to 300 (scale-down default) silently delays scale-up |
 | `behavior.scaleDown.stabilizationWindowSeconds` | 300 | How long HPA waits before acting on scale-down | Setting to 0 causes aggressive scale-down on transient load drops |
 | `behavior.*.selectPolicy` | Max | Which policy wins when multiple policies apply | `Disabled` blocks ALL scaling in that direction |
 | `behavior.*.policies[].type` | — | `Pods` (absolute count) or `Percent` (relative %) | Percent at small replica counts can be slower than Pods |
@@ -1010,6 +1288,9 @@ spec:
 **Namespace rule:**
 
 HPA, scaleTargetRef, and any `Object` metric's `describedObject` must all be in the same namespace. Cross-namespace HPA targeting is not supported. If `scaleTargetRef.name` points to a Deployment in a different namespace, the HPA will silently fail with `ScalingActive: False` / `FailedGetScale` — no error at apply time.
+
+
+### HPA Behavior — `selectPolicy` and Multiple Policies
 
 **`behavior.*.selectPolicy`** 
 
@@ -1032,24 +1313,13 @@ selectPolicy: Disabled
   → blocks ALL scaling in this direction entirely
   → example: scaleDown.selectPolicy: Disabled prevents any scale-down
   → useful during an incident: block scale-down while investigating
-
-Real-world example — two policies, Max vs Min:
-  policies:
-    - type: Percent  value: 100  periodSeconds: 30   → doubles current count
-    - type: Pods     value: 4    periodSeconds: 15   → adds 4 per 15s
-
-  Starting at 1 replica, sustained high load, after 30s:
-    Percent says: 1 → 2  (+1)
-    Pods says:    1 → 5  (+4, two 15s windows in 30s)
-    selectPolicy: Max → takes Pods result → 5 replicas
-    selectPolicy: Min → takes Percent result → 2 replicas
 ```
 
 **Can you use both `Pods`-type and `Percent`-type policies in the same HPA?**
 
-Yes — `policies` is a list and accepts multiple entries of different types. This is exactly
-the example above. The `selectPolicy` field then arbitrates which one drives the outcome
-each cycle.
+`selectPolicy` determines which policy wins when you define more than one entry under
+a `scaleUp` or `scaleDown` block. The HPA evaluates ALL policies every cycle and uses
+`selectPolicy` to choose one result.
 
 ```yaml
 behavior:
@@ -1069,725 +1339,35 @@ larger replica count wins. The field is named `policies` (plural) because it acc
 from the start — the design explicitly allows mixing `Pods` and `Percent` entries to express
 complex scaling shapes (e.g. "double up to 10, then add 2 at a time above that").
 
----
 
-### Understanding VPA — Vertical Pod Autoscaler
-
-#### VPA Architecture and Components
-
-VPA consists of three independent components running in kube-system. They are maintained by Kubernetes SIG Autoscaling in the `kubernetes/autoscaler` GitHub repository — the same repository that hosts Cluster Autoscaler.
+**Worked example — same two policies, Max vs Min:**
 
 ```
-vpa-recommender
-  Role:    observe and recommend
-  Input:   queries metrics-server (metrics.k8s.io) for current CPU/memory
-           reads VerticalPodAutoscalerCheckpoint objects for historical data
-  Process: builds a histogram model of usage per container over time
-           calculates percentile-based recommendations
-  Output:  writes recommendations to VPA object .status.recommendation
-           writes/updates VerticalPodAutoscalerCheckpoint objects
+Starting at 1 replica, sustained high load. After 30 seconds:
 
-vpa-updater
-  Role:    enforce recommendations on running pods
-  Input:   reads VPA object .status.recommendation
-           reads PodDisruptionBudget objects
-  Process: identifies pods whose current requests differ significantly
-           from the Target recommendation
-           checks PDB to confirm eviction is safe
-  Output:  evicts pods via Eviction API (NOT direct DELETE — respects PDB)
-           does NOT modify resource values itself — eviction triggers recreate
+  Percent (value: 100, period: 30s): 1 → 2   (+1 = +100% of current)
+  Pods    (value: 4,   period: 15s): 1 → 5   (+4, because two 15s windows fit in 30s)
 
-vpa-admission-controller (Mutating Webhook)
-  Role:    inject correct resources at pod creation
-  Input:   intercepts ALL pod creation requests to kube-apiserver
-           reads VPA object .status.recommendation
-  Process: checks if a VPA applies to this pod
-           if yes: patches the pod spec with recommended resource values
-  Output:  modified pod spec with injected CPU/memory requests
-           called on initial create AND after updater evictions
+  selectPolicy: Max → Pods wins → 5 replicas
+    (Pods proposed the most change: +4 vs Percent's +1)
+
+  selectPolicy: Min → Percent wins → 2 replicas
+    (Percent proposed the least change: +1 vs Pods' +4)
+
+Starting at 20 replicas, sustained high load. After 30 seconds:
+
+  Percent (value: 100, period: 30s): 20 → 40  (+20 = +100% of current)
+  Pods    (value: 4,   period: 15s): 20 → 28  (+8, because two 15s windows)
+
+  selectPolicy: Max → Percent wins → 40 replicas
+    (at large counts, Percent produces more change than Pods)
+
+  selectPolicy: Min → Pods wins → 28 replicas
 ```
 
-**How the three components work together — lifecycle:**
-
-```
-Step 1: You deploy a Deployment and create a VPA object (any mode)
-
-Step 2 (Recommender): begins querying metrics-server every 60s
-       → accumulates CPU/memory samples into a histogram per container
-       → after ~1 minute: writes initial recommendation to VPA.status
-       → continues refining as more data accumulates (default: 8 days)
-       → writes/updates VPACheckpoint for persistence across restarts
-
-Step 3a (Off mode only — stops here):
-       Recommendations visible in VPA.status, but nothing is applied
-
-Step 3b (Recreate or InPlaceOrRecreate mode):
-       Updater reads VPA.status recommendation
-       → identifies pods where current requests differ significantly
-       → checks PDB: if eviction would violate budget, waits
-       → evicts pod via Eviction API
-
-Step 4: Deployment controller recreates the evicted pod
-
-Step 5: Admission Controller intercepts the new pod's creation
-       → finds the matching VPA object
-       → patches pod spec: injects Target CPU/memory as requests
-       → pod starts with right-sized resources
-
-Step 6: Recommender continues observing the newly-sized pod
-       → refines recommendations over time
-```
-
-**Installation:**
-```bash
-# VPA is NOT bundled with Kubernetes
-# Source: github.com/kubernetes/autoscaler
-
-git clone https://github.com/kubernetes/autoscaler.git
-cd autoscaler/vertical-pod-autoscaler/hack
-./vpa-up.sh
-
-# Uninstall:
-./vpa-down.sh
-```
-
-#### VPA Algorithm — How Recommendations Are Calculated
-
-**Inputs to the algorithm:**
-
-```
-Input 1: Current metrics — from metrics-server (metrics.k8s.io)
-         CPU usage (nanocores), memory working set (bytes) per container
-         polled every 60 seconds
-
-Input 2: Historical data — from VerticalPodAutoscalerCheckpoint
-         CPU and memory usage histograms persisted across Recommender restarts
-         decayed over time — older samples have less weight than recent ones
-         default observation window: 8 days (configurable via --history-length)
-
-Input 3: resourcePolicy — from the VPA spec
-         containerPolicies[].minAllowed → floor constraint
-         containerPolicies[].maxAllowed → ceiling constraint
-```
-
-**The histogram model — what it is with a concrete example:**
-
-Rather than tracking a raw time series of every sample, VPA Recommender maintains a weighted histogram per container per resource. Think of it as a bar chart where:
-- The X-axis represents CPU usage values (bucketed into ranges, e.g. 0–10m, 10–20m, etc.)
-- The Y-axis represents how much "weight" (frequency × recency decay) falls in each bucket
-- Recent samples are weighted higher than old samples
-
-```
-Example: nginx container CPU usage over 10 minutes of load
-
-Observation timeline:
-  t=0s   CPU=10m   (idle)
-  t=15s  CPU=110m  (request arriving)
-  t=30s  CPU=115m
-  t=45s  CPU=108m
-  t=60s  CPU=112m
-  t=75s  CPU=10m   (quiet period)
-  t=90s  CPU=11m
-
-Histogram buckets (simplified):
-  0–20m:   weight=2.1  (two observations, lower weight due to older)
-  100–120m: weight=4.8  (four recent observations, higher weight)
-  80–100m:  weight=0.0
-  ...
-
-90th percentile: the value below which 90% of the total weight falls
-  → the histogram says: 90% of the time (by weight), usage is at or below 113m
-  → Target = 113m
-```
-
-The histogram is stored in the VerticalPodAutoscalerCheckpoint object. If the Recommender pod restarts, it resumes from the checkpoint rather than starting over.
-
-**Observation window and configurability:**
-
-```
-Default observation window: 8 days (--history-length flag)
-Minimum before recommendation: approximately 1 minute of data
-                               (enough for a first rough recommendation)
-
-To adjust the window (on VPA Recommender deployment):
-  --history-length=24h   → use only last 24 hours of data
-  --history-length=168h  → use last 7 days (default is 192h = 8 days)
-```
-
-**The output fields — what each means and what triggers scaling:**
-
-```
-Target:
-  → 90th percentile of observed usage over the history window
-  → This is what VPA WILL SET as resources.requests if mode=Recreate/InPlaceOrRecreate
-  → "90% of the time, the container needs at most this much"
-  → Scaling trigger: Updater compares current requests to Target
-                    if they differ significantly, Updater evicts the pod
-
-Lower Bound:
-  → safety margin below Target
-  → calculated as approximately 25th percentile (varies by VPA version)
-  → "if requests are set this low, there is high risk of throttling or OOMKill"
-  → VPA will not recommend below minAllowed from resourcePolicy
-  → NOT directly used by Updater for eviction decisions — that uses Target
-
-Upper Bound:
-  → VPA's estimate of the maximum the container could ever need
-  → constrained by maxAllowed from resourcePolicy — VPA will not recommend above it
-  → "above this value is wasteful — the container has never needed this much"
-  → NOT a ceiling the Updater enforces — it is informational
-
-Uncapped Target:
-  → the raw percentile recommendation BEFORE applying any resourcePolicy constraints
-    (minAllowed / maxAllowed)
-  → represents what the algorithm actually sees from usage data alone
-  → may be below minAllowed (algorithm wants to go lower but policy blocks it)
-  → may be above maxAllowed (algorithm wants to go higher but policy blocks it)
-
-Why Uncapped Target exists:
-  When Target and Uncapped Target differ, it tells you that a policy constraint
-  is overriding the algorithm's data-driven recommendation. Without Uncapped Target
-  you would not know whether Target reflects actual usage or a policy floor/ceiling.
-
-  If Target = Uncapped Target:
-    → policy constraints are not affecting the recommendation
-    → Target accurately reflects observed usage — trust it
-
-  If Target > Uncapped Target:
-    → minAllowed is raising the floor above what usage data warrants
-    → action: your minAllowed may be too conservative — consider lowering it
-    → example: container never uses more than 30m CPU, but minAllowed=100m
-               forces Target to 100m even though usage data suggests 30m
-
-  If Target < Uncapped Target:
-    → maxAllowed is capping the recommendation below what usage data warrants
-    → action: your maxAllowed may be too restrictive — the container needs more
-    → example: container peaks at 2 CPU, but maxAllowed=500m
-               forces Target to 500m even though usage suggests 2000m
-               → the container will be CPU-throttled at peaks
-
-Concrete example (from Step 10 lab output):
-  Container: nginx (idle after lab cleanup)
-  resourcePolicy: minAllowed.cpu=50m
-
-  Raw histogram 90th pct: 49m  ← below minAllowed (container barely uses CPU)
-  Uncapped Target: cpu=49m     ← what the algorithm wants to set
-  minAllowed:      cpu=50m     ← policy floor
-  Target:          cpu=50m     ← policy raises it to floor
-
-  Target (50m) ≠ Uncapped Target (49m):
-    → minAllowed is active: the 1m difference is a policy floor, not real usage
-    → in this case the effect is trivial (1m)
-    → in a busier scenario the difference could be significant:
-      Uncapped=5m vs Target=100m → minAllowed is making the pod 20x over-provisioned
-      → lower minAllowed to reclaim wasted capacity
-```
-
-**Scale-down decision:**
-
-VPA does not have an equivalent to HPA's stabilisation window. The Updater evicts a pod when its current requests fall outside the [Lower Bound, Upper Bound] range, or when the current requests differ significantly from Target. The Updater polls on its own schedule and respects PDB — it will wait if eviction would violate the budget. There is no separate "scale-down delay" like HPA's 5-minute window.
-
-**Complete worked example — all fields:**
-
-```
-Container: nginx
-Observation: 8 days of mixed traffic
-Resources currently set: cpu=100m, memory=128Mi
-
-Recommender builds histogram:
-  CPU:    90th pct = 143m, 25th pct = 50m
-  Memory: 90th pct = 250Mi, 25th pct = 200Mi
-
-resourcePolicy:
-  minAllowed: cpu=50m, memory=64Mi
-  maxAllowed: cpu=2, memory=2Gi
-
-Recommendation output:
-  Target:         cpu=143m, memory=250Mi   ← 90th pct, within policy bounds
-  Lower Bound:    cpu=50m,  memory=200Mi   ← ~25th pct, floored at minAllowed
-  Upper Bound:    cpu=2,    memory=2Gi     ← capped at maxAllowed
-  Uncapped Target: cpu=143m, memory=250Mi  ← same as Target (policy not clamping)
-
-Updater sees:
-  Current requests: cpu=100m (below Target of 143m), memory=128Mi (below 250Mi)
-  Both below Target → pod is under-provisioned → Updater evicts
-
-After eviction + recreation + Admission Controller:
-  New requests: cpu=143m, memory=250Mi   ← Target injected by Admission Controller
-
-Now if traffic drops to very low for 8 days:
-  Target might recalculate to: cpu=50m, memory=200Mi
-  Current requests: cpu=143m (above Target of 50m) → over-provisioned
-  Updater evicts again → Admission Controller injects cpu=50m, memory=200Mi
-```
-
-#### Multi-Container Pods and containerPolicies
-
-VPA tracks EACH container in a pod separately and produces independent recommendations per container. This is by design — the app container and a log-shipping sidecar have entirely different resource profiles.
-
-**Where containerPolicies fits:**
-
-`containerPolicies` is the field inside `spec.resourcePolicy` that lets you configure per-container VPA behaviour:
-
-```yaml
-spec:
-  resourcePolicy:
-    containerPolicies:
-      - containerName: app              # target this specific container
-        minAllowed:
-          cpu: 100m
-          memory: 256Mi
-        maxAllowed:
-          cpu: 4
-          memory: 4Gi
-        controlledValues: RequestsAndLimits
-
-      - containerName: sidecar          # different settings for the sidecar
-        minAllowed:
-          cpu: 10m
-          memory: 32Mi
-        maxAllowed:
-          cpu: 500m
-          memory: 128Mi
-        controlledValues: RequestsOnly  # only adjust requests; leave limits alone
-
-      - containerName: "*"             # wildcard: applies to all containers
-        mode: "Off"                    # not matched by the above rules
-                                       # Off = VPA observes but never changes
-                                       # Use to exclude containers from updates
-                                       # while still getting recommendations
-```
-
-```
-containerName: "app"   → applies only to the container named "app"
-containerName: "*"     → wildcard — applies to every container not matched
-                          by a more specific containerName rule above it
-
-mode: "Auto"           → VPA manages this container (observe + recommend + update)
-mode: "Off"            → VPA observes and records (recommendations appear in status)
-                          but the Updater and Admission Controller skip this container
-                          useful when you want to exclude one container in a pod
-                          from VPA changes while still seeing what it would recommend
-
-controlledValues: "RequestsAndLimits"
-  → VPA adjusts BOTH resources.requests and resources.limits
-  → limits are scaled proportionally to maintain the original request:limit ratio
-
-controlledValues: "RequestsOnly"
-  → VPA adjusts resources.requests only
-  → resources.limits remain exactly as set in the manifest
-  → use when you want VPA to right-size requests but preserve custom limits
-```
-
-#### VPA Update Modes
-
-```
-Off:
-  Recommender: ✅ runs — writes to VPA.status
-  Updater:     ❌ does not evict pods
-  Admission:   ❌ does not modify pod resources
-  Result:      recommendations visible — no pod changes ever
-  Use for:     capacity planning; "what should my requests be?"
-               safe to run on any workload in production without disruption
-
-Initial:
-  Recommender: ✅ runs — writes to VPA.status
-  Updater:     ❌ does not evict running pods
-  Admission:   ✅ injects resources only when pod is first created
-  Result:      new pods start right-sized; running pods unchanged
-  Use for:     gradual right-sizing — new pods get correct resources
-               without disrupting currently running pods
-
-Recreate (most common active mode):
-  Recommender: ✅ runs
-  Updater:     ✅ evicts pods when resources differ significantly from Target
-               uses Eviction API — respects PDB
-  Admission:   ✅ injects resources on every pod creation
-  Result:      pods evicted and recreated with updated resources
-  Use for:     active right-sizing where pod restart is acceptable
-               most stateless workloads
-
-InPlaceOrRecreate (preferred over Recreate for production):
-  Recommender: ✅ runs
-  Updater:     ✅ attempts in-place resize first (no restart required)
-               falls back to Recreate if in-place resize is not supported
-               or fails (requires Kubernetes InPlacePodVerticalScaling feature gate)
-  Admission:   ✅ injects resources on creation
-  Result:      resize without restart if possible — less disruption
-  Use for:     production — preferred over bare Recreate
-
-Auto (DEPRECATED since VPA v1.4+):
-  Currently equivalent to Recreate
-  DO NOT USE — will be removed in a future API version
-  If you see this warning:
-  "Warning: UpdateMode 'Auto' is deprecated and will be removed in a
-   future API version. Use 'Recreate', 'Initial', or
-   'InPlaceOrRecreate' instead."
-  → Replace "Auto" with "Recreate" or "InPlaceOrRecreate" immediately
-```
-
-**Updater and PodDisruptionBudget:**
-
-```
-VPA Updater uses the Eviction API — it respects PDB
-  → reads minAvailable / maxUnavailable before evicting
-  → will not evict if doing so would violate the budget
-  → waits until PDB permits eviction
-
-This is in contrast to HPA scale-down, which uses direct DELETE
-and does NOT consult PDB (see HPA and PDB section above)
-
-Practical setup: if your workload needs VPA + high availability:
-  Deployment with replicas ≥ 2
-  PDB with minAvailable=1 (allows VPA to evict one at a time)
-  VPA mode: Recreate or InPlaceOrRecreate
-```
-
-#### What VPA Can Target
-
-```
-Supported:
-  Deployment      → most common — Deployment controller recreates evicted pods
-  StatefulSet     → supported — ordered pod eviction preserved
-  DaemonSet       → supported — use carefully (one pod per node; eviction
-                    temporarily removes the pod from that node)
-  ReplicaSet      → supported (prefer Deployment)
-  Job/CronJob     → Initial mode only — Updater will not evict running Job pods
-                    since they are run-to-completion (no controller to recreate them
-                    mid-run); Initial injects correct resources at pod start
-  Custom resources → any resource whose pods have labels matching the VPA
-                     targetRef selector and whose controller recreates evicted pods
-```
-
-```
-NOT supported:
-
-Standalone pods (pods not managed by any controller):
-  Why: VPA Updater evicts pods so the controller recreates them with new resources.
-       A standalone pod has no controller — eviction just deletes it permanently.
-       The pod is gone and nothing recreates it.
-       Fix: always use a Deployment (even with replicas: 1) for VPA to work.
-       A Deployment with replicas: 1 is a "single-pod app", which IS supported.
-
-  "Standalone pod" ≠ "single-pod app":
-    Standalone pod    → no controller, exists directly as a Pod object
-                        VPA cannot target it
-    Single-pod app    → Deployment with replicas: 1 (or StatefulSet, etc.)
-                        VPA CAN target it — the controller recreates evicted pods
-
-Pod-level resource stanzas (kubernetes.io/pod-level resources, beta v1.34+):
-  Why: VPA operates at the CONTAINER level. It reads per-container usage from
-       cAdvisor and produces per-container recommendations. The pod-level
-       resource spec (spec.resources at pod level, not container level) is a
-       newer feature that VPA does not currently handle — it will not inject
-       pod-level resources, and pod-level specs may interfere with VPA's
-       container-level injection. Use container-level resources with VPA.
-```
-
-#### VPA CRDs and kubectl Commands
-
-```
-Two CRDs installed with VPA:
-
-1. VerticalPodAutoscaler (vpa) — autoscaling.k8s.io/v1
-   What you create: the configuration and recommendation object
-   Contains: targetRef, updatePolicy, resourcePolicy, status/recommendations
-   You create and manage these directly
-
-2. VerticalPodAutoscalerCheckpoint (vpacheckpoint) — autoscaling.k8s.io/v1
-   Why it exists: the Recommender builds a histogram model of usage over days.
-                  If the Recommender pod restarts (upgrade, crash, eviction),
-                  all that accumulated histogram data would be lost and the
-                  Recommender would have to start from scratch — no recommendations
-                  for ~1 minute minimum, up to hours for a stable recommendation.
-   What it does:  persists the histogram data to etcd via this CRD object.
-                  On restart, the Recommender reads its checkpoints and resumes
-                  from where it left off — no data loss, no recommendation gap.
-   How it works:  one VPACheckpoint object per container per VPA object
-                  Recommender creates and updates them automatically
-                  You do not create these — VPA manages them
-
-kubectl commands:
-  kubectl get vpa                          # list all VPAs
-  kubectl describe vpa <name>              # full detail including recommendations
-  kubectl get vpa <name> -o yaml           # full YAML including status
-  kubectl get vpacheckpoint                # inspect historical histogram data
-  kubectl describe vpacheckpoint <name>    # histogram contents + last update time
-  # No imperative create for VPA — must be defined declaratively
-```
-
-**kubectl get vpa — output explained:**
-
-```bash
-kubectl get vpa
-```
-
-```
-NAME               MODE      CPU    MEM     PROVIDED   AGE
-nginx-vpa-off      Off                      False      5s
-nginx-vpa-recreate Recreate  143m   250Mi   True       2m50s
-
-NAME      → VPA object name (from metadata.name)
-MODE      → update mode: Off, Initial, Recreate, InPlaceOrRecreate
-CPU       → recommended CPU request from Target field
-            blank = recommendation not yet available (wait ~1 min)
-MEM       → recommended memory request from Target field
-            blank = recommendation not yet available
-PROVIDED  → True = recommendation is ready (RecommendationProvided condition is True)
-            False = Recommender still collecting data
-            stay False beyond 5 minutes: check vpa-recommender logs
-AGE       → how long this VPA object has existed
-```
-
-**kubectl describe vpa — key sections explained:**
-
-```bash
-kubectl describe vpa nginx-vpa-off
-```
-
-```
-Spec:
-  Target Ref:
-    Kind: Deployment          → the kind of workload VPA is watching
-    Name: nginx-deploy        → the specific workload instance
-
-  Update Policy:
-    Update Mode: Off          → Off: observe only; Recreate: evict and update;
-                                Initial: inject at creation; InPlaceOrRecreate: prefer in-place
-
-  Resource Policy:
-    Container Policies:
-      Container Name: nginx
-      Min Allowed:
-        Cpu: 50m              → VPA will never recommend below this
-        Memory: 64Mi            (protects against over-aggressive downsizing)
-      Max Allowed:
-        Cpu: 2                → VPA will never recommend above this
-        Memory: 2Gi             (prevents runaway recommendation)
-
-Status:
-  Conditions:
-    Type: RecommendationProvided
-    Status: True              → True:  recommendation is ready and current
-                                False: still collecting — wait ~1 minute
-                                       if False after 5+ minutes, check
-                                       vpa-recommender pod logs
-
-  Recommendation:
-    Container Recommendations:
-      Container Name: nginx
-
-      Lower Bound:            → minimum safe resources for this container
-        Cpu: 50m                set below this → high probability of
-        Memory: 250Mi           CPU throttling or OOMKill
-                                floored at resourcePolicy.minAllowed
-
-      Target:                 → the value VPA WILL SET as requests
-        Cpu: 143m               90th percentile of observed usage
-        Memory: 250Mi           the Updater compares current requests to this
-                                if different, it triggers eviction
-
-      Uncapped Target:        → Target recommendation BEFORE policy constraints
-        Cpu: 49m                if this differs from Target, a policy constraint
-        Memory: 250Mi           is clamping the recommendation:
-                                Uncapped < Target → minAllowed is raising the floor
-                                Uncapped > Target → maxAllowed is capping the ceiling
-                                Uncapped == Target → policy is not affecting anything
-
-      Upper Bound:            → maximum observed need (informational)
-        Cpu: 2                  above this → wasteful allocation
-        Memory: 2Gi             capped at resourcePolicy.maxAllowed
-                                this is NOT a ceiling VPA enforces —
-                                it is a signal that your maxAllowed
-                                matches actual observed peaks
-
-Events:                       → check for warnings if PROVIDED stays False
-  Warning  FailedToReconcileVPA  → check vpa-recommender logs
-  Normal   EvictedPod            → Updater evicted a pod (mode=Recreate)
-```
-
-**kubectl get vpacheckpoint — what it contains:**
-
-```bash
-kubectl get vpacheckpoint
-# NAME                      AGE
-# nginx-vpa-off-nginx       2m
-
-kubectl describe vpacheckpoint nginx-vpa-off-nginx
-```
-
-```
-Spec:
-  Container Name: nginx           → which container this checkpoint covers
-  VPA Object Name: nginx-vpa-off  → which VPA this checkpoint belongs to
-
-Status:
-  Cpu Histogram:                  → the stored histogram of observed CPU usage
-    BucketWeights: [...]            bucket = usage range, weight = accumulated
-                                    frequency × recency decay factor
-    ReferenceTimestamp: ...         when this histogram segment was recorded
-    TotalWeight: 1.0
-
-  Memory Histogram: [...]         → same structure for memory usage
-
-  LastUpdateTime: ...             → when Recommender last wrote to this checkpoint
-                                    stale LastUpdateTime may indicate Recommender
-                                    is not running or not finding the pods
-  Version: ...                    → histogram format version
-
-What this tells you:
-  Recommender uses this to restore its model after restart
-  BucketWeights show which CPU/memory ranges are most common
-  TotalWeight shows how much data has been accumulated
-  You should not need to edit or delete checkpoints manually
-  VPA creates one checkpoint per container per VPA object
-```
-
----
-
-### VerticalPodAutoscaler — Complete Field Reference
-
-```yaml
-apiVersion: autoscaling.k8s.io/v1
-kind: VerticalPodAutoscaler
-metadata:
-  name: nginx-vpa
-  namespace: default
-spec:
-
-  # ── What to scale ──────────────────────────────────────────────
-  targetRef:
-    apiVersion: apps/v1           # API group of target workload
-    kind: Deployment              # Deployment, StatefulSet, DaemonSet, etc.
-                                  # NOT standalone Pod — must have a controller
-    name: nginx-deploy            # name of the target workload instance
-                                  # MUST be in the same namespace as the VPA
-                                  # cross-namespace VPA targeting is not supported
-
-  # ── Update mode ────────────────────────────────────────────────
-  updatePolicy:
-    updateMode: "Recreate"        # Off:               recommend only, never evict
-                                  # Initial:           inject at pod creation only
-                                  # Recreate:          evict + recreate with new resources
-                                  # InPlaceOrRecreate: try in-place first, fallback Recreate
-                                  # "Auto":            DEPRECATED — do not use
-
-  # ── Resource constraints per container ─────────────────────────
-  # resourcePolicy is OPTIONAL — omitting it lets VPA manage all containers
-  # with no bounds (unconstrained recommendations from usage data alone)
-  resourcePolicy:
-    containerPolicies:
-      # Each entry targets one container by name, or "*" for all unmatched
-      - containerName: nginx      # exact container name from the pod spec
-                                  # or "*" for wildcard (all remaining containers)
-
-        mode: "Auto"              # Auto: VPA actively manages this container
-                                  #       Recommender observes, Updater evicts,
-                                  #       Admission Controller injects
-                                  # Off:  VPA observes and records usage only
-                                  #       Recommendations appear in .status
-                                  #       but Updater and Admission Controller
-                                  #       skip this container entirely
-
-        minAllowed:               # VPA floor — recommendation never goes below this
-          cpu: 50m                # protects against CPU throttling from too-small requests
-          memory: 64Mi            # protects against OOMKill from too-small memory
-                                  # if omitted: no floor — VPA can recommend arbitrarily low
-
-        maxAllowed:               # VPA ceiling — recommendation never goes above this
-          cpu: 2                  # prevents unbounded resource recommendations
-          memory: 2Gi             # set based on node capacity and cost tolerance
-                                  # if omitted: no ceiling — VPA can recommend arbitrarily high
-
-        controlledResources:      # which resources VPA manages for this container
-          - cpu                   # default if omitted: [cpu, memory]
-          - memory                # omit a resource to leave it entirely unmanaged
-                                  # example: [memory] only → VPA adjusts memory, never CPU
-
-        controlledValues:         # what VPA updates per managed resource
-          # RequestsAndLimits (default if omitted):
-          #   VPA updates resources.requests AND resources.limits
-          #   limits are scaled proportionally — original request:limit ratio maintained
-          #   example: request=100m limit=500m (ratio 1:5)
-          #            VPA target=200m → sets request=200m limit=1000m (preserves 1:5)
-          #
-          # RequestsOnly:
-          #   VPA updates resources.requests ONLY
-          #   resources.limits remain exactly as set in the manifest
-          #   use when you have custom limits you want to preserve
-          #   use when container hits OOMKill but you cannot raise limits
-```
-
-**status — written by VPA after observing:**
-
-```yaml
-status:
-  conditions:
-    - type: RecommendationProvided
-      status: "True"              # "True" = recommendation available
-                                  # "False" = still collecting (wait ~1 min)
-      lastTransitionTime: ...
-      reason: RecommendationProvided
-
-  recommendation:
-    containerRecommendations:
-      - containerName: nginx
-
-        lowerBound:               # minimum safe — throttling/OOMKill likely below this
-          cpu: 50m
-          memory: 250Mi
-
-        target:                   # recommended value — VPA will SET this as requests
-          cpu: 143m               # 90th percentile of observed usage
-          memory: 250Mi
-
-        uncappedTarget:           # recommendation before min/max policy applied
-          cpu: 49m                # compare with target to diagnose policy clamping
-          memory: 250Mi
-
-        upperBound:               # maximum observed — wasteful to allocate above this
-          cpu: 2                  # informational only — not enforced by Updater
-          memory: 2Gi
-```
-
-**Field-by-field explanation:**
-
-| Field | Default | What it controls | Common mistake |
-|---|---|---|---|
-| `updatePolicy.updateMode` | Recreate | Off/Initial/Recreate/InPlaceOrRecreate | Using "Auto" — deprecated since v1.4 |
-| `resourcePolicy` (whole block) | none (optional) | Per-container bounds and behaviour | Omitting entirely lets VPA make unconstrained recommendations |
-| `resourcePolicy.containerPolicies[].containerName` | required | Which container to configure; `"*"` = all unmatched | Typo in container name — VPA silently falls back to `"*"` |
-| `resourcePolicy.containerPolicies[].mode` | Auto | `Auto` (manage) or `Off` (observe only for this container) | Not setting `Off` on containers you want VPA to leave alone |
-| `resourcePolicy.containerPolicies[].minAllowed` | none | VPA floor — recommendation never goes below this | Setting too high locks in over-provisioning regardless of actual usage |
-| `resourcePolicy.containerPolicies[].maxAllowed` | none | VPA ceiling — recommendation never goes above this | Omitting maxAllowed allows unbounded recommendations on spiky workloads |
-| `resourcePolicy.containerPolicies[].controlledResources` | [cpu, memory] | Which resources VPA tracks and adjusts | Forgetting to set [memory] only — VPA then also adjusts CPU unexpectedly |
-| `resourcePolicy.containerPolicies[].controlledValues` | RequestsAndLimits | Whether VPA also adjusts limits proportionally | Using RequestsAndLimits when you have custom limits you want preserved |
-
-**Namespace rule:**
-
-VPA, `targetRef`, and the pods being managed must all be in the same namespace. Cross-namespace VPA targeting is not supported. A VPA in `namespace: monitoring` cannot target a Deployment in `namespace: default` — it will silently fail to find the target and produce no recommendations.
-
-**All resourcePolicy options summary:**
-
-```
-containerPolicies[].mode:
-  Auto  → VPA observes, recommends, and updates this container
-  Off   → VPA observes and recommends ONLY; Updater and Admission skip it
-
-containerPolicies[].controlledValues:
-  RequestsAndLimits → VPA updates requests + limits (proportional ratio preserved)
-  RequestsOnly      → VPA updates requests only; limits unchanged
-
-containerPolicies[].controlledResources: [cpu, memory]
-  Any subset:  [cpu]         → VPA manages CPU only
-               [memory]      → VPA manages memory only
-               [cpu, memory] → VPA manages both (default)
-
-containerPolicies[].minAllowed / maxAllowed:
-  No defaults — omitting means no constraint in that direction
-  When set: recommendation is clamped to [minAllowed, maxAllowed]
-  Uncapped Target shows what the algorithm would recommend without these bounds
-```
+The crossover point: `Pods` wins at small replica counts (absolute step > relative step);
+`Percent` wins at large replica counts (relative step > absolute step). `selectPolicy`
+lets you choose which behaviour dominates.
 
 ---
 
@@ -1844,156 +1424,14 @@ KEDA — Kubernetes Event-Driven Autoscaling:
   Scale-to-zero supported (HPA cannot go below minReplicas=1)
   Use case: message queue consumer — scale to 0 when queue empty
   Implements both custom.metrics.k8s.io and external.metrics.k8s.io
-  Hands-on: aws-eks-demos
+  50+ built-in scalers (SQS, Kafka, Redis, cron, HTTP, Prometheus)
+  Hands-on: 04-keda-adapter
 
 Karpenter:
   AWS-native node provisioner — modern replacement for CA on EKS
   Faster provisioning, more granular instance selection, spot/on-demand mix
   Uses NodePool and EC2NodeClass CRDs
   Hands-on: aws-eks-demos
-```
-
----
-
-### HPA vs VPA — Compare and Contrast
-
-| | HPA | VPA |
-|---|---|---|
-| **What it scales** | Number of pod replicas | CPU/memory requests per container |
-| **Scale direction** | Horizontal (out/in) | Vertical (up/down) |
-| **Responds to** | Traffic spikes — more pods needed | Resource mis-sizing — requests wrong |
-| **Best for** | Stateless workloads (web, API, workers) | Stateful workloads, single-pod apps, right-sizing |
-| **Built into Kubernetes** | ✅ Yes — core, no extra install | ❌ No — separate install from kubernetes/autoscaler |
-| **Maintained by** | Kubernetes SIG Autoscaling (core repo) | Kubernetes SIG Autoscaling (kubernetes/autoscaler) |
-| **Requires metrics-server** | ✅ Yes | ✅ Yes (Recommender uses it) |
-| **Eviction API** | ❌ No — direct DELETE | ✅ Yes — respects PDB |
-| **Respects PDB** | ❌ No | ✅ Yes |
-| **API version** | autoscaling/v2 | autoscaling.k8s.io/v1 |
-| **CRDs** | HorizontalPodAutoscaler | VerticalPodAutoscaler, VerticalPodAutoscalerCheckpoint |
-| **Imperative creation** | ✅ kubectl autoscale | ❌ declarative only |
-| **Pod restart needed** | ❌ No — adds/removes pods | ✅ Yes (Recreate) or ❌ No (InPlaceOrRecreate) |
-| **Works with standalone pod** | ❌ No (no replicas) | ❌ No (no controller to recreate after eviction) |
-| **Can scale to zero** | ❌ No — minReplicas ≥ 1 | N/A |
-| **Data retention** | N/A — reads live metrics | 8 days (histogram in VPACheckpoint) |
-
-**Key parameters compared:**
-```
-HPA key parameters:
-  minReplicas       → floor for replica count
-  maxReplicas       → ceiling for replica count
-  metrics[]         → what to measure (cpu, memory, custom, external)
-  behavior          → scale speed and stabilisation windows
-  averageUtilization → target % of request across pods
-
-VPA key parameters:
-  updateMode        → Off, Initial, Recreate, InPlaceOrRecreate
-  minAllowed        → floor for recommended request
-  maxAllowed        → ceiling for recommended request
-  containerName     → which container to manage
-  controlledValues  → RequestsAndLimits or RequestsOnly
-```
-
-**When to use which:**
-```
-Use HPA when:
-  → traffic is variable and unpredictable
-  → workload is stateless (each replica is identical)
-  → application can handle multiple parallel instances
-  → you want fast response to traffic spikes (seconds)
-
-Use VPA when:
-  → you do not know the right resource requests for a new app
-  → traffic is steady but resource usage is unclear
-  → workload is stateful (database, queue consumer)
-  → you want to prevent OOMKill or CPU throttling
-  → you want to reduce resource waste from over-provisioning
-
-Safe combinations (HPA + VPA can coexist):
-  HPA on CPU/memory + VPA in Off mode
-    → HPA scales replicas on CPU/memory; VPA only recommends — no conflict
-    → this is the most common safe pattern in production
-  HPA on custom/external metrics + VPA in Recreate mode on CPU/memory
-    → HPA uses a different signal (queue depth, request rate) — no interference
-    → VPA adjusts requests; HPA is not watching requests — no conflict cycle
-  All three together (HPA + VPA + CA):
-    → CA responds to Pending pods (no node capacity)
-    → CA does not interact with HPA or VPA decisions at all
-    → CA adds nodes so HPA-created pods can schedule; VPA right-sizes those pods
-    → SAFE as long as the HPA+VPA combination itself is safe (see above)
-
-Conflict — only one specific combination:
-  HPA on CPU/memory + VPA on CPU/memory (Recreate/Initial mode)
-    → both tools watch and modify the same signal (CPU/memory requests)
-    → VPA changes the denominator HPA uses → conflict cycle
-    → the cycle: HPA scales out → VPA raises per-pod requests →
-                 HPA sees lower % (higher denominator) → scales in →
-                 fewer pods → higher per-pod load → VPA raises again
-    → AVOID this combination ❌
-```
-
-**Sizing strategy — how to choose min/max values:**
-
-Finding the right `minReplicas`/`maxReplicas` (HPA) and `minAllowed`/`maxAllowed` (VPA) is not guesswork — there is a methodology:
-
-```
-Step 1: Start with VPA in Off mode — no risk, observations only
-  → deploy with best-guess resource requests (too high is safer than too low)
-  → deploy a VPA with updateMode: "Off" and no resourcePolicy constraints
-  → let it observe for at least 24-48 hours of representative traffic
-  → read Target (90th pct) and Upper Bound from kubectl describe vpa
-  → these become your starting resource requests in the Deployment manifest
-
-Step 2: Right-size resource requests using VPA recommendations
-  CPU request:    set to VPA Target (90th pct) — handles normal load
-  Memory request: set to VPA Upper Bound (or slightly above) — memory OOMKill
-                  is more disruptive than CPU throttling; be conservative
-  Example:
-    VPA Target:       cpu=143m, memory=250Mi
-    VPA Upper Bound:  cpu=2,    memory=2Gi
-    Set in manifest:  cpu=150m, memory=300Mi  (slight headroom above Target)
-
-Step 3: Set HPA minReplicas
-  Rule: number of replicas needed to handle baseline/off-peak traffic
-        without HPA scaling (your always-on floor)
-  Start at: 1 for dev/test; 2 for production (HA — tolerates one pod failure)
-  Increase if: single pod at idle already uses >40% CPU (scale out before load)
-  Example: if idle CPU is 30% of request → 1 replica is fine baseline
-
-Step 4: Set HPA maxReplicas
-  Rule: maximum replicas your infrastructure (nodes) can accommodate,
-        capped by cost tolerance
-  Formula: maxReplicas = (total schedulable node CPU) / (CPU request per pod) × 0.8
-           (0.8 = 20% headroom for system pods and overhead)
-  Example: 3 nodes × 2 CPU = 6 CPU total
-           one system pod per node ≈ 0.2 CPU overhead each
-           schedulable = 6 - 0.6 = 5.4 CPU
-           CPU request per pod = 150m = 0.15 CPU
-           maxReplicas = 5.4 / 0.15 × 0.8 = 28 (theoretical)
-           Apply cost ceiling: if 10 pods is your cost limit → maxReplicas: 10
-  Start conservative, raise based on observed peak traffic
-
-Step 5: Set VPA minAllowed
-  Rule: the minimum safe resource floor — below which the container
-        will be throttled or OOMKilled under ANY traffic
-  Start at: 50% of VPA Lower Bound (25th pct recommendation)
-  Never set below: minimum needed for the container to start successfully
-  Example: VPA Lower Bound cpu=50m → minAllowed.cpu=50m is reasonable
-           If container crashes at startup with cpu=25m → set minAllowed=30m
-
-Step 6: Set VPA maxAllowed
-  Rule: maximum resources a single container should ever use
-  Start at: 110-120% of VPA Upper Bound (observed maximum)
-  Cap at:   node allocatable capacity (no point recommending more than fits)
-  Watch:    Uncapped Target — if it exceeds maxAllowed, raise maxAllowed
-            or the container will be perpetually under-provisioned
-  Example: VPA Upper Bound = 2 CPU on a 4-CPU node → maxAllowed.cpu=2 is safe
-
-Step 7: Monitor and iterate
-  kubectl top pods                   → ongoing CPU/memory usage
-  kubectl describe vpa               → Uncapped Target vs Target (policy impact)
-  kubectl get hpa -w                 → scaling frequency (too often = threshold too tight)
-  kubectl get events | grep Scale    → scale events (frequency and reason)
-  Revise thresholds every 2-4 weeks for the first 2 months
 ```
 
 ---
@@ -2005,7 +1443,7 @@ Step 7: Monitor and iterate
 ### Step 1 — Cluster Setup and Prerequisites
 
 ```bash
-cd 11-auto-scaling/01-autoscaling/src
+cd 11-auto-scaling/01-hpa-basic/src
 
 # Verify metrics-server is running (required for HPA and VPA)
 kubectl get pods -n kube-system | grep metrics-server
@@ -2040,7 +1478,7 @@ kubectl describe node 3node | grep Taints
 
 ### Step 2 — Deploy nginx Application
 
-**`src/nginx-deploy.yaml`:**
+**`src/01-nginx-deploy.yaml`:**
 ```yaml
 apiVersion: apps/v1
 kind: Deployment
@@ -2084,7 +1522,7 @@ spec:
 ```
 
 ```bash
-kubectl apply -f nginx-deploy.yaml
+kubectl apply -f 01-nginx-deploy.yaml
 kubectl rollout status deployment/nginx-deploy
 kubectl get pods -o wide
 kubectl top pods
@@ -2107,7 +1545,7 @@ nginx-deploy-xxxxxxxxx-xxxxx    0m           3Mi
 without any additional pulls. It sends continuous HTTP requests to
 the nginx service, driving CPU utilisation up.
 
-**`src/load-generator.yaml`:**
+**`src/02-load-generator.yaml`:**
 ```yaml
 apiVersion: v1
 kind: Pod
@@ -2133,6 +1571,7 @@ spec:
           cpu: "500m"
           memory: "64Mi"
 ```
+
 > **Why busybox?** Lightweight, pre-cached on most nodes, no registry
 > pull needed, simple wget-based load generation. For more realistic
 > load patterns, `fortio` or `k6` are production-grade alternatives
@@ -2140,7 +1579,7 @@ spec:
 > `busybox` is sufficient for demonstrating HPA scaling behaviour.
 
 ```bash
-kubectl apply -f load-generator.yaml
+kubectl apply -f 02-load-generator.yaml
 kubectl get pod load-generator
 
 # Watch CPU rise (~30s)
@@ -2163,7 +1602,7 @@ nginx-deploy-xxxxxxxxx-xxxxx    115m         15Mi
 
 ### Step 4 — HPA: CPU Based (autoscaling/v2)
 
-**`src/hpa-cpu-v2.yaml`:**
+**`src/03-hpa-cpu-v2.yaml`:**
 ```yaml
 apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler
@@ -2186,7 +1625,7 @@ spec:
 ```
 
 ```bash
-kubectl apply -f hpa-cpu-v2.yaml
+kubectl apply -f 03-hpa-cpu-v2.yaml
 
 # Watch in real time
 kubectl get hpa nginx-hpa-cpu -w
@@ -2202,8 +1641,9 @@ nginx-hpa-cpu  Deployment/nginx-deploy    cpu: 37%/50%        1      5        3
 
 ```
 # Observation: <unknown>/50% → first scrape not yet done (metrics-server polls every 60s)
-#              115%/50%     → current 115%, target 50% → formula: ceil[1 × 115/50] = ceil[2.3] = 3
-#              37%/50%      → after 3 replicas: same load spread across 3 pods → 115/3 ≈ 38%
+#              115%/50%     → current 115%, target 50%
+#                             formula: ceil[1 x 115/50] = ceil[2.3] = 3
+#              37%/50%      → after 3 replicas: 115/3 ~ 38% (within tolerance)
 #              REPLICAS: 3  → HPA updated the scale subresource to 3
 ```
 
@@ -2256,14 +1696,14 @@ nginx-hpa-cpu  Deployment/nginx-deploy  cpu: 0%/50%   1  5  1   ← scaled down 
 ```
 
 ```bash
-kubectl delete -f hpa-cpu-v2.yaml
+kubectl delete -f 03-hpa-cpu-v2.yaml
 ```
 
 ---
 
 ### Step 5 — HPA: Memory Based (autoscaling/v2)
 
-**`src/hpa-memory-v2.yaml`:**
+**`src/04-hpa-memory-v2.yaml`:**
 ```yaml
 apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler
@@ -2286,7 +1726,7 @@ spec:
 ```
 
 ```bash
-kubectl apply -f hpa-memory-v2.yaml
+kubectl apply -f 04-hpa-memory-v2.yaml
 kubectl get hpa nginx-hpa-memory
 ```
 
@@ -2330,14 +1770,14 @@ Metrics:
 ```
 
 ```bash
-kubectl delete -f hpa-memory-v2.yaml
+kubectl delete -f 04-hpa-memory-v2.yaml
 ```
 
 ---
 
 ### Step 6 — HPA: Multiple Metrics (autoscaling/v2)
 
-**`src/hpa-multi-metric.yaml`:**
+**`src/05-hpa-multi-metric.yaml`:**
 ```yaml
 apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler
@@ -2366,7 +1806,7 @@ spec:
 ```
 
 ```bash
-kubectl apply -f hpa-multi-metric.yaml
+kubectl apply -f 05-hpa-multi-metric.yaml
 kubectl describe hpa nginx-hpa-multi | grep -A8 "Metrics:"
 ```
 
@@ -2391,7 +1831,7 @@ Metrics:
 
 **Apply load and observe multi-metric scaling:**
 ```bash
-kubectl apply -f load-generator.yaml
+kubectl apply -f 02-load-generator.yaml
 sleep 30
 kubectl describe hpa nginx-hpa-multi | grep -A8 "Metrics:"
 ```
@@ -2412,7 +1852,7 @@ Metrics:
 
 ```bash
 kubectl delete pod load-generator --grace-period=0 --force
-kubectl delete -f hpa-multi-metric.yaml
+kubectl delete -f 05-hpa-multi-metric.yaml
 ```
 
 ---
@@ -2423,7 +1863,7 @@ kubectl delete -f hpa-multi-metric.yaml
 kubectl autoscale deployment nginx-deploy \
   --min=1 \
   --max=5 \
-  --cpu=50%                    # modern format (--cpu-percent is deprecated)
+  --cpu=50%    # modern format (--cpu-percent is deprecated)
 
 kubectl get hpa nginx-deploy
 ```
@@ -2458,7 +1898,7 @@ metrics:
 
 ```
 # Observation: kubectl autoscale creates autoscaling/v2 internally
-#              even though the flag feels like v1 syntax
+#              even though the --cpu=50% flag feels like v1 syntax
 ```
 
 ```bash
@@ -2469,7 +1909,7 @@ kubectl delete hpa nginx-deploy
 
 ### Step 8 — HPA Behaviour: Custom Scale-Up/Down Policies
 
-**`src/hpa-behaviour.yaml`:**
+**`src/06-hpa-behaviour.yaml`:**
 ```yaml
 apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler
@@ -2532,8 +1972,8 @@ scaleDown:
 ```
 
 ```bash
-kubectl apply -f hpa-behaviour.yaml
-kubectl apply -f load-generator.yaml
+kubectl apply -f 06-hpa-behaviour.yaml
+kubectl apply -f 02-load-generator.yaml
 
 kubectl get hpa nginx-hpa-behaviour -w
 ```
@@ -2574,7 +2014,7 @@ Behavior:
 >
 > In the verification output this occurred because the old nginx-deploy
 > HPA from `kubectl autoscale` was not deleted before applying
-> hpa-behaviour.yaml.
+> 06-hpa-behaviour.yaml.
 >
 > **Rule: one HPA per workload — never create two HPAs targeting the same deployment.**
 
@@ -2587,9 +2027,9 @@ kubectl get hpa nginx-hpa-behaviour -w
 
 **Expected output:**
 ```
-nginx-hpa-behaviour  cpu: 0%/50%  ...  3   ← load removed
-nginx-hpa-behaviour  cpu: 0%/50%  ...  3   ← within 60s window
-nginx-hpa-behaviour  cpu: 0%/50%  ...  1   ← scaled down after 60s
+nginx-hpa-behaviour  cpu: 0%/50%  ...  3   <- load removed
+nginx-hpa-behaviour  cpu: 0%/50%  ...  3   <- within 60s window
+nginx-hpa-behaviour  cpu: 0%/50%  ...  1   <- scaled down after 60s
 ```
 
 ```
@@ -2597,348 +2037,38 @@ nginx-hpa-behaviour  cpu: 0%/50%  ...  1   ← scaled down after 60s
 ```
 
 ```bash
-kubectl delete -f hpa-behaviour.yaml
+kubectl delete -f 06-hpa-behaviour.yaml
 ```
 
 ---
 
-### Step 9 — Install VPA
-
-VPA is not bundled with Kubernetes. Install from the official repo:
+### Step 9 — Cleanup
 
 ```bash
-git clone https://github.com/kubernetes/autoscaler.git
-cd autoscaler/vertical-pod-autoscaler/hack
-./vpa-up.sh
-cd ../../..
-```
+kubectl delete -f 01-nginx-deploy.yaml --ignore-not-found
+kubectl delete -f 02-load-generator.yaml --ignore-not-found
+kubectl delete -f 03-hpa-cpu-v2.yaml --ignore-not-found
+kubectl delete -f 04-hpa-memory-v2.yaml --ignore-not-found
+kubectl delete -f 05-hpa-multi-metric.yaml --ignore-not-found
+kubectl delete -f 06-hpa-behaviour.yaml --ignore-not-found
+kubectl delete hpa nginx-deploy --ignore-not-found
 
-**Expected output:**
-```
-customresourcedefinition.../verticalpodautoscalers created
-customresourcedefinition.../verticalpodautoscalercheckpoints created
-clusterrole.../system:vpa-actor created
-...
-deployment.apps/vpa-updater created
-deployment.apps/vpa-recommender created
-deployment.apps/vpa-admission-controller created
-```
-
-Verify all three VPA components are running:
-```bash
-kubectl get pods -n kube-system | grep vpa
-```
-
-**Expected output:**
-```
-vpa-admission-controller-xxxxxxxxx-xxxxx   1/1   Running   0   52s
-vpa-recommender-xxxxxxxxx-xxxxx            1/1   Running   0   53s
-vpa-updater-xxxxxxxxx-xxxxx                1/1   Running   0   53s
-```
-
-Verify VPA CRDs installed:
-```bash
-kubectl api-resources | grep verticalpod
-```
-
-**Expected output:**
-```
-verticalpodautoscalercheckpoints  vpacheckpoint  autoscaling.k8s.io/v1  true  VerticalPodAutoscalerCheckpoint
-verticalpodautoscalers            vpa            autoscaling.k8s.io/v1  true  VerticalPodAutoscaler
-```
-
-```
-# Observation: two CRDs installed — vpa (the config + recommendation object you create)
-#              and vpacheckpoint (the histogram storage object VPA manages automatically)
-```
-
----
-
-### Step 10 — VPA: Off Mode (Recommendations Only)
-
-Off mode is safe to run on any workload in production — VPA observes and recommends but never changes pods.
-
-**`src/vpa-off.yaml`:**
-```yaml
-apiVersion: autoscaling.k8s.io/v1
-kind: VerticalPodAutoscaler
-metadata:
-  name: nginx-vpa-off
-spec:
-  targetRef:
-    apiVersion: apps/v1
-    kind: Deployment
-    name: nginx-deploy
-  updatePolicy:
-    updateMode: "Off"         # observe only — Updater never evicts, Admission never patches
-  resourcePolicy:
-    containerPolicies:
-      - containerName: nginx
-        minAllowed:
-          cpu: 50m
-          memory: 64Mi
-        maxAllowed:
-          cpu: 2
-          memory: 2Gi
-```
-
-```bash
-kubectl apply -f vpa-off.yaml
-kubectl get vpa nginx-vpa-off
-```
-
-**Expected output (initial — no recommendation yet):**
-```
-NAME            MODE   CPU   MEM   PROVIDED   AGE
-nginx-vpa-off   Off                False      0s
-```
-
-Wait ~1 minute for Recommender to gather data:
-```bash
-kubectl describe vpa nginx-vpa-off
-```
-
-**Expected output (after recommendation available):**
-```
-Status:
-  Conditions:
-    Status: True
-    Type:   RecommendationProvided
-  Recommendation:
-    Container Recommendations:
-      Container Name: nginx
-      Lower Bound:
-        Cpu:    50m
-        Memory: 250Mi
-      Target:
-        Cpu:    50m
-        Memory: 250Mi
-      Uncapped Target:
-        Cpu:    49m
-        Memory: 250Mi
-      Upper Bound:
-        Cpu:    2
-        Memory: 2Gi
-```
-
-```
-# Observation: Target CPU = 50m (at minAllowed floor — nginx idle uses very little CPU)
-#              Uncapped Target = 49m (raw recommendation before policy)
-#              → minAllowed is raising the floor by 1m
-#              Target Memory = 250Mi — nginx uses more memory than the 128Mi request
-#              → this pod is UNDER-provisioned for memory (request=128Mi, target=250Mi)
-#              → Mode=Off means nothing is applied — these are recommendations only
-```
-
-Compare current requests vs recommendation:
-```bash
-kubectl describe pod -l app=nginx | grep -A4 "Requests:"
-```
-
-**Expected output:**
-```
-Requests:
-  cpu:     100m     ← current manifest setting
-  memory:  128Mi    ← current manifest setting
-```
-
-```
-VPA recommends: cpu=50m, memory=250Mi
-Current setting: cpu=100m, memory=128Mi
-
-VPA says: CPU is over-provisioned (50m target vs 100m request)
-          Memory is under-provisioned (250Mi target vs 128Mi request)
-Mode=Off: no changes applied — review only
-```
-
-```bash
-kubectl delete -f vpa-off.yaml
-```
-
----
-
-### Step 11 — VPA: Recreate Mode (Automatic Resource Adjustment)
-
-Recreate mode evicts pods and recreates them with recommended resource requests injected by the Admission Controller.
-
-**`src/vpa-recreate.yaml`:**
-```yaml
-apiVersion: autoscaling.k8s.io/v1
-kind: VerticalPodAutoscaler
-metadata:
-  name: nginx-vpa-recreate
-spec:
-  targetRef:
-    apiVersion: apps/v1
-    kind: Deployment
-    name: nginx-deploy
-  updatePolicy:
-    updateMode: "Recreate"    # Updater will evict pods; Admission will inject resources
-  resourcePolicy:
-    containerPolicies:
-      - containerName: nginx
-        minAllowed:
-          cpu: 50m
-          memory: 64Mi
-        maxAllowed:
-          cpu: 1
-          memory: 1Gi
-```
-
-> **Note:** "Auto" mode is deprecated since VPA v1.4+. If you use "Auto" you will see:
-> `Warning: UpdateMode "Auto" is deprecated and will be removed in a future API version.`
-> Use "Recreate", "Initial", or "InPlaceOrRecreate" instead. Do not use "Auto" in new manifests.
-
-```bash
-kubectl apply -f vpa-recreate.yaml
-kubectl get vpa nginx-vpa-recreate
-```
-
-Wait for recommendation and watch for pod eviction:
-```bash
-kubectl get pods -w &
-WATCH_PID=$!
-kubectl get vpa nginx-vpa-recreate -w
-```
-
-**Expected output:**
-```
-NAME               MODE      CPU    MEM     PROVIDED   AGE
-nginx-vpa-recreate Recreate                            0s
-nginx-vpa-recreate Recreate  143m   250Mi   True       60s
-```
-
-After recommendation is available, check pod resources:
-```bash
-# After recommendation is available, check if pod was evicted and recreated
+kubectl get hpa
+kubectl get deployments
 kubectl get pods
-kubectl describe pod -l app=nginx | grep -A4 "Requests:"
 ```
 
-**Expected output after VPA applies recommendation:**
+**Expected output:**
 ```
-Requests:
-  cpu:     143m    ← updated by VPA Admission Controller (was 100m) ✅
-  memory:  250Mi   ← updated by VPA Admission Controller (was 128Mi) ✅
-```
-
-```
-# Observation: Updater evicted the old pod (Eviction API — respects PDB)
-#              Deployment controller recreated it
-#              Admission Controller intercepted the new pod creation
-#              and injected cpu=143m, memory=250Mi as requests
-#              These are exactly the VPA Target values from the recommendation
+No resources found in default namespace.
+No resources found in default namespace.
+No resources found in default namespace.
 ```
 
-Check events for evidence of eviction:
-```bash
-kubectl get events --sort-by='.lastTimestamp' | grep -i vpa
 ```
-
-```bash
-kill $WATCH_PID 2>/dev/null
-kubectl delete -f vpa-recreate.yaml
-```
-
----
-
-### Step 12 — VPA + HPA Conflict Demo
-
-This step demonstrates the conflict that occurs when **HPA on CPU/memory** runs simultaneously with **VPA in Recreate mode on CPU/memory** — both tools watching and modifying the same signal. This is NOT a general statement that HPA and VPA cannot coexist — they can and do in production. The conflict is specific to both tools targeting CPU/memory at the same time.
-
-> **Safe combinations that avoid this conflict:** HPA on CPU/memory + VPA in Off mode (VPA recommends only); HPA on custom/external metrics + VPA in Recreate mode (different signals — no interference). See the HPA vs VPA section for the full breakdown and sizing strategy.
-
-```bash
-kubectl apply -f nginx-deploy.yaml
-kubectl apply -f hpa-cpu-v2.yaml
-```
-
-**`src/vpa-conflict.yaml`:**
-```yaml
-apiVersion: autoscaling.k8s.io/v1
-kind: VerticalPodAutoscaler
-metadata:
-  name: nginx-vpa-conflict
-spec:
-  targetRef:
-    apiVersion: apps/v1
-    kind: Deployment
-    name: nginx-deploy
-  updatePolicy:
-    updateMode: "Recreate"
-  resourcePolicy:
-    containerPolicies:
-      - containerName: nginx
-        minAllowed:
-          cpu: 50m
-          memory: 64Mi
-        maxAllowed:
-          cpu: 1
-          memory: 1Gi
-```
-
-```bash
-kubectl apply -f vpa-conflict.yaml
-kubectl apply -f load-generator.yaml
-sleep 60
-
-kubectl get hpa nginx-hpa-cpu
-kubectl get vpa nginx-vpa-conflict
-```
-
-**Expected output showing conflict:**
-```
-HPA: cpu: 38%/50%  replicas: 3   ← HPA scaled out under CPU load
-VPA: cpu: 143m     provided: True ← VPA raised CPU request to 143m
-
-After VPA raises requests:
-  HPA sees: 38%/50% (with higher request denominator → lower %)
-  HPA might scale DOWN ← conflict with HPA scaling up
-```
-
-**The conflict cycle:**
-```
-1. Load increases → pod CPU rises to 115% of 100m request
-2. HPA scales to 3 replicas — load spread across 3 pods
-3. VPA raises CPU request from 100m to 143m per pod
-4. HPA recalculates: same 38m CPU usage / new 143m request = 27%
-5. 27% is well below 50% target → HPA scales DOWN
-6. Fewer pods → higher per-pod CPU → VPA may recommend more CPU
-7. Cycle continues → neither HPA nor VPA can stabilise
-
-Root cause: VPA changes the denominator (request) that HPA uses to
-calculate utilisation%. Any change in requests shifts HPA's
-perceived load even if actual CPU usage is unchanged.
-```
-
-**Safe solution:**
-```bash
-kubectl delete -f vpa-conflict.yaml
-
-# Keep HPA for horizontal scaling
-# Use VPA in Off mode — recommendations only, no request changes
-kubectl apply -f vpa-off.yaml
-```
-
-**Cleanup:**
-```bash
-kubectl delete pod load-generator --grace-period=0 --force
-kubectl delete -f hpa-cpu-v2.yaml
-kubectl delete -f vpa-off.yaml
-kubectl delete -f nginx-deploy.yaml
-```
-
----
-
-### Step 13 — Final Cleanup: Uninstall VPA
-
-```bash
-cd autoscaler/vertical-pod-autoscaler/hack
-./vpa-down.sh
-cd ../../..
-
-kubectl get pods -n kube-system | grep vpa
-# No VPA pods should remain
+# Observation: metrics-server stays enabled — required by 02-hpa-advanced,
+#              03-vpa-fundamentals, and all later scaling demos.
+#              VPA is not installed in this lab — see 03-vpa-fundamentals.
 ```
 
 ---
@@ -2946,8 +2076,8 @@ kubectl get pods -n kube-system | grep vpa
 ## What You Learned
 
 In this lab, you:
-- ✅ Understood the three Kubernetes autoscaling types — HPA, VPA, CA — what each does, when each applies, and who maintains each
-- ✅ Explained cAdvisor — embedded in kubelet, reads from cgroups (not /proc), provides current-snapshot-only data with no historical retention
+- ✅ Explained all three Kubernetes autoscaling types — HPA, VPA, CA — what each does, when each applies, and who maintains each
+- ✅ Explained cAdvisor — embedded in kubelet, reads from cgroups (not /proc), current-snapshot-only data with no historical retention
 - ✅ Explained metrics-server — cluster addon, aggregates cAdvisor data across all nodes, exposes the Metrics API, retains only the most recent sample
 - ✅ Traced the full HPA metrics pipeline — cAdvisor → kubelet → metrics-server → kube-apiserver → HPA controller → scale subresource
 - ✅ Explained the scale subresource and scaleTargetRef — what HPA actually reads and writes
@@ -2956,13 +2086,8 @@ In this lab, you:
 - ✅ Configured custom HPA behaviour — shorter stabilisation window and Pods-type policies
 - ✅ Explained all five HPA metric types and which metrics pipeline each uses
 - ✅ Understood why HPA does not use the Eviction API and what that means for PDB
-- ✅ Installed VPA and understood all three components (Recommender, Updater, Admission Controller)
-- ✅ Explained the VPA algorithm — histogram model, 90th percentile target, all output fields
-- ✅ Used VPA Off mode for recommendations without pod changes
-- ✅ Used VPA Recreate mode and observed Admission Controller injecting resources on pod recreation
-- ✅ Demonstrated HPA + VPA conflict and understood the safe combination patterns
 
-**Key Takeaway:** HPA and VPA are complementary, not competing — HPA adjusts replica count in response to traffic; VPA adjusts resource requests based on observed usage. Together they converge toward a cluster that scales efficiently and allocates precisely. The conflict arises only when both target the same signal (CPU/memory). The safe pattern is HPA on traffic signals + VPA in Off mode for visibility, or HPA on custom metrics + VPA in Recreate mode for active right-sizing.
+**Key Takeaway:** HPA is the right tool when adding more pods solves the problem — stateless workloads where every replica is interchangeable. The metrics pipeline (cAdvisor → metrics-server → HPA controller) runs at 60-second and 15-second intervals respectively; the scale subresource is what HPA writes to, never the full Deployment spec. Correct resource requests are the prerequisite for a meaningful HPA signal — a wrong request value makes the formula produce wrong answers. For right-sizing those requests, see `03-vpa-fundamentals`.
 
 ---
 
@@ -2973,14 +2098,12 @@ In this lab, you:
 | `kubectl get hpa` | List all HPAs — TARGETS, MINPODS, MAXPODS, REPLICAS |
 | `kubectl describe hpa <name>` | Full HPA status — metrics, conditions, events |
 | `kubectl get hpa <name> -w` | Watch HPA scaling decisions in real time |
+| `kubectl get hpa <name> -o yaml` | Full YAML including current status |
 | `kubectl autoscale deployment <name> --cpu=50% --min=1 --max=5` | Create HPA imperatively (v2 internally) |
 | `kubectl top pods` | Current pod CPU/memory (requires metrics-server) |
 | `kubectl top nodes` | Current node CPU/memory |
-| `kubectl get vpa` | List all VPAs — MODE, CPU, MEM, PROVIDED |
-| `kubectl describe vpa <name>` | VPA recommendations and all status fields |
-| `kubectl get vpacheckpoint` | List histogram checkpoints |
-| `kubectl get events --sort-by='.lastTimestamp' \| grep -i "scale\|vpa"` | Scaling and eviction events |
 | `kubectl get apiservices \| grep metrics` | Verify Metrics API is registered |
+| `kubectl get events --sort-by='.lastTimestamp' \| grep -i scale` | Scaling events |
 
 ---
 
@@ -2994,7 +2117,7 @@ kind: HorizontalPodAutoscaler
 
 ✅ **HPA scaling formula — know and apply it:**
 ```
-desiredReplicas = ceil[currentReplicas × (currentValue / targetValue)]
+desiredReplicas = ceil[currentReplicas x (currentValue / targetValue)]
 ```
 
 ✅ **Resource requests are mandatory for utilisation-based HPA** — without them, TARGETS shows `<unknown>`
@@ -3009,20 +2132,10 @@ kubectl autoscale deployment <name> --cpu=50% --min=1 --max=5
 # NOT --cpu-percent (deprecated)
 ```
 
-✅ **VPA modes — know all four:**
+✅ **`<unknown>` in TARGETS:**
 ```
-Off              → recommendations only — no pod changes
-Initial          → inject at pod creation only — running pods unchanged
-Recreate         → evict and recreate with new resources
-InPlaceOrRecreate → try in-place resize first, fall back to Recreate
-Auto             → DEPRECATED — do not use
-```
-
-✅ **HPA + VPA safe combinations:**
-```
-HPA (CPU/memory) + VPA (Off)       → safe — VPA only recommends
-HPA (custom metrics) + VPA (active) → safe — different signals
-HPA (CPU/memory) + VPA (Recreate)  → conflict ❌ — avoid
+Transient:   wait 30-60s after pod creation (first metrics-server scrape)
+Persistent:  resources.requests not set on all containers in the pod
 ```
 
 ✅ **cAdvisor vs metrics-server retention:**
@@ -3061,28 +2174,10 @@ kubectl describe hpa <name>
 ```bash
 # Normal — default 5-minute stabilisation window prevents it
 kubectl describe hpa <name> | grep -A5 Events
-# SuccessfulRescale event will appear after 5 minutes of consistent low demand
+# SuccessfulRescale event appears after 5 minutes of consistent low demand
 ```
 
-**VPA shows no recommendations (PROVIDED stays False):**
-```bash
-kubectl describe vpa <name>
-# RecommendationProvided: False → wait ~1 minute for first data
-# Still False after 5 minutes:
-kubectl get pods -n kube-system | grep vpa-recommender
-kubectl logs -n kube-system -l app=vpa-recommender | tail -20
-```
-
-**VPA pod not being evicted despite recommendation (Recreate mode):**
-```bash
-kubectl describe vpa <name> | grep "Update Mode"
-# Must be Recreate or InPlaceOrRecreate — not Off
-kubectl get pods -n kube-system | grep vpa-updater
-# With only 1 replica: VPA may not evict to avoid downtime
-# Add a second replica or a PDB allowing disruption, or use InPlaceOrRecreate
-```
-
-**HPA or VPA targeting a workload in a different namespace:**
+**HPA targeting a workload in a different namespace:**
 ```bash
 # HPA and its scaleTargetRef must be in the same namespace
 kubectl get hpa -n <namespace>
@@ -3091,7 +2186,7 @@ kubectl describe hpa <name> -n <namespace>
 # Check: HPA namespace == Deployment namespace
 # Cross-namespace targeting is not supported — create the HPA in the
 # same namespace as the Deployment it manages
-```
+
 # v1beta1.metrics.k8s.io should show True
 # If False or absent: metrics-server pod may be crash-looping
 kubectl describe pod -n kube-system -l k8s-app=metrics-server

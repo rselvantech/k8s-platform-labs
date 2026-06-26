@@ -4,9 +4,9 @@ metadata:
   name: nginx-hpa-cpu
 spec:
   scaleTargetRef:
-    apiVersion: apps/v1       # must match the deployment's apiVersion
+    apiVersion: apps/v1
     kind: Deployment
-    name: nginx-deploy        # must match the deployment name exactly
+    name: nginx-deploy
   minReplicas: 1
   maxReplicas: 5
   metrics:
@@ -15,4 +15,4 @@ spec:
         name: cpu
         target:
           type: Utilization
-          averageUtilization: 50   # scale out when average CPU > 50%
+          averageUtilization: 50    # target 50% of the 100m request = 50m average per pod

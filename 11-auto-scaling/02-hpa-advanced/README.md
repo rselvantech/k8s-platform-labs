@@ -2,7 +2,7 @@
 
 ## Lab Overview
 
-`01-autoscaling` covered HPA's `Resource` metric type (CPU and memory, averaged across all containers in a pod), `behavior` with `Pods`-type scaling policies, and an introduction to VPA. This lab extends the HPA side of that picture into territory `01-autoscaling` only documented conceptually.
+`01-hpa-basic` covered HPA's `Resource` metric type (CPU and memory, averaged across all containers in a pod), `behavior` with `Pods`-type scaling policies, and an introduction to VPA. This lab extends the HPA side of that picture into territory `01-hpa-basic` only documented conceptually.
 
 Two gaps stand out once you have used HPA on a single-container pod: what happens when a pod has more than one container, and how do you control the shape of a scaling curve rather than just its target? This lab answers both — then goes one level deeper into the metrics pipeline itself, covering what serves HPA's `Pods`, `Object`, and `External` metric types when CPU/memory are not the right signal.
 
@@ -10,33 +10,33 @@ Two gaps stand out once you have used HPA on a single-container pod: what happen
 
 **What this lab covers:**
 - `ContainerResource` metric type — scaling based on ONE container's CPU/memory in a multi-container pod
-- HPA `behavior` — `Percent`-type scale-up/scale-down policies, and how they differ from `01-autoscaling`'s `Pods`-type policies
+- HPA `behavior` — `Percent`-type scale-up/scale-down policies, and how they differ from `01-hpa-basic`'s `Pods`-type policies
 - The Custom Metrics API (`custom.metrics.k8s.io`) and the `Pods`/`Object` HPA metric types
 - The External Metrics API (`external.metrics.k8s.io`), the `External` metric type, and metrics adapter architecture
 - A decision framework for choosing among all five HPA metric types
 
-> **Scope note:** Steps 1–3 are hands-on (minikube `3node`, the same cluster as `01-autoscaling`, metrics-server already enabled). Step 4 (Decision Framework) is a short theory step — no cluster commands. For deeper adapter architecture and E2E flows, see `## Kubernetes Scaling — API & Adapter Reference` below. Prometheus-based custom metrics (`Pods`/`Object` types with Prometheus Adapter) are covered hands-on in `11-auto-scaling/05-prometheus-adapter` (minikube `3node`). AWS-specific external metrics (SQS, ALB, CloudWatch) are covered in `aws-eks-demos`.
+> **Scope note:** Steps 1–3 are hands-on (minikube `3node`, the same cluster as `01-hpa-basic`, metrics-server already enabled). Step 4 (Decision Framework) is a short theory step — no cluster commands. For deeper adapter architecture and E2E flows, see `## Kubernetes Scaling — API & Adapter Reference` below. Prometheus-based custom metrics (`Pods`/`Object` types with Prometheus Adapter) are covered hands-on in `11-auto-scaling/05-prometheus-adapter` (minikube `3node`). AWS-specific external metrics (SQS, ALB, CloudWatch) are covered in `aws-eks-demos`.
 
-> **Verification status:** Steps 1–3 expected outputs and Break-Fix scenarios are written from documented HPA v2 behaviour, consistent with the facts already verified in `01-autoscaling`. They have not yet been run against this lab's manifests on a live cluster — run through Steps 1–3 and Break-Fix on your `3node` cluster and report back anything that differs.
+> **Verification status:** Steps 1–3 expected outputs and Break-Fix scenarios are written from documented HPA v2 behaviour, consistent with the facts already verified in `01-hpa-basic`. They have not yet been run against this lab's manifests on a live cluster — run through Steps 1–3 and Break-Fix on your `3node` cluster and report back anything that differs.
 
 ---
 
 ## Prerequisites
 
 **Required Software:**
-- Minikube `3node` profile — same cluster used in `01-autoscaling`
+- Minikube `3node` profile — same cluster used in `01-hpa-basic`
 - kubectl installed and configured
-- metrics-server enabled (already done in `01-autoscaling` Step 1)
+- metrics-server enabled (already done in `01-hpa-basic` Step 1)
 
 **Verify metrics-server before starting:**
 ```bash
 kubectl get pods -n kube-system | grep metrics-server
 kubectl top nodes
-# Both must work before proceeding — if not, see 01-autoscaling Step 1
+# Both must work before proceeding — if not, see 01-hpa-basic Step 1
 ```
 
 **Knowledge Requirements:**
-- **REQUIRED:** Completion of `01-autoscaling` — HPA v2 `Resource` metric type, the HPA scaling formula (`desiredReplicas = ceil[currentReplicas x (currentValue / targetValue)]`), scale-down stabilisation, `behavior` with `Pods`-type policies, and VPA `Off`/`Recreate` modes
+- **REQUIRED:** Completion of `01-hpa-basic` — HPA v2 `Resource` metric type, the HPA scaling formula (`desiredReplicas = ceil[currentReplicas × (currentValue / targetValue)]`), scale-down stabilisation, `behavior` with `Pods`-type policies
 - **REQUIRED:** Understanding of multi-container pods — containers in the same pod share network and IPC namespaces but have independent resource requests/limits
 
 ---
@@ -48,7 +48,7 @@ By the end of this lab, you will be able to:
 2. ✅ Configure an HPA using `ContainerResource` to target a single container's CPU
 3. ✅ Explain why a `Resource`-type HPA can scale based on a non-targeted container's load, and how `ContainerResource` avoids this
 4. ✅ Configure HPA `behavior` using `Percent`-type scale-up and scale-down policies
-5. ✅ Calculate the step-size effect of `Percent` policies and compare it against the `Pods`-based policies from `01-autoscaling`
+5. ✅ Calculate the step-size effect of `Percent` policies and compare it against the `Pods`-based policies from `01-hpa-basic`
 6. ✅ Explain the purpose of `selectPolicy` (Min/Max/Disabled) and how multiple policies interact
 7. ✅ Choose the correct HPA metric type for a given scaling scenario across all five types
 8. ✅ Describe the role of a metrics adapter and which HPA metric types require one
@@ -76,9 +76,9 @@ By the end of this lab, you will be able to:
 
 ---
 
-## Recall Check — 01-autoscaling
+## Recall Check — 01-hpa-basic
 
-Answer from memory before continuing — these are scenario questions from `01-autoscaling`.
+Answer from memory before continuing — these are scenario questions from `01-hpa-basic`.
 
 1. A Deployment is running at 1 replica. An HPA's `kubectl describe` shows current CPU at 115% and target at 50%. Using the HPA scaling formula, how many replicas does the HPA scale to, and what is the calculation?
 2. After that scale-up, load drops to 0% CPU. By default, how long does the HPA wait before scaling back down, and what is it doing during that wait?
@@ -123,7 +123,7 @@ string the adapter exposes (e.g. `requests_per_second`, `sqs_queue_depth`).
 
 ### HPA `ContainerResource` — Per-Container Metrics
 
-`01-autoscaling` used `type: Resource`, which computes utilisation across the **whole pod**:
+`01-hpa-basic` used `type: Resource`, which computes utilisation across the **whole pod**:
 
 ```
 Resource utilisation = sum(usage across ALL containers) / sum(requests across ALL containers)
@@ -161,7 +161,7 @@ The `on container "X"` wording is the tell — if you see this, the HPA is scope
 
 ### HPA Behavior — `Percent` vs `Pods` Scaling Policies
 
-`01-autoscaling` Step 8 used `behavior` policies of `type: Pods` — an **absolute** number of pods per period:
+`01-hpa-basic` Step 8 used `behavior` policies of `type: Pods` — an **absolute** number of pods per period:
 
 ```yaml
 scaleUp:
@@ -196,7 +196,7 @@ Percent, value: 100, periodSeconds: 30:
   Window 3 (30s): 4 -> 8   (+100% of 4, capped at desired)
 ```
 
-At **small** replica counts, `Pods` with a large `value` reaches desired faster (linear, fixed step). At **large** replica counts, `Percent` reaches it faster (the step grows with current size). The same applies to `scaleDown`: `Percent, value: 50` halves per period vs `01-autoscaling`'s `Pods, value: 2` which removed at most 2 per period regardless of fleet size.
+At **small** replica counts, `Pods` with a large `value` reaches desired faster (linear, fixed step). At **large** replica counts, `Percent` reaches it faster (the step grows with current size). The same applies to `scaleDown`: `Percent, value: 50` halves per period vs `01-hpa-basic`'s `Pods, value: 2` which removed at most 2 per period regardless of fleet size.
 
 ---
 
@@ -208,11 +208,11 @@ At **small** replica counts, `Pods` with a large `value` reaches desired faster 
 > the lab steps — not as a prerequisite to them.
 >
 > **Hands-on covered elsewhere:**
-> - HPA usage, YAML, scaling behaviour → `01-autoscaling`
-> - VPA installation and usage → `03-vpa-advanced`
+> - HPA usage, YAML, scaling behaviour → `01-hpa-basic`
+> - VPA installation and usage → `03-vpa-fundamentals`
 > - Prometheus Adapter hands-on → `11-auto-scaling/05-prometheus-adapter` (minikube `3node`)
 > - AWS-specific sources (SQS, ALB, CloudWatch), CA, KEDA SQS → `aws-eks-demos`
-> - KEDA core (Kafka, Redis, Prometheus scalers) → `04-keda`
+> - KEDA core (Kafka, Redis, Prometheus scalers) → `04-keda-adapter`
 
 ---
 
@@ -831,7 +831,7 @@ All three (HPA custom + VPA + CA)      →  safe and recommended for production:
 
 The following flows show the complete chain for each HPA metric type that requires
 an adapter. Types `Resource` and `ContainerResource` (metrics-server, no adapter)
-are not included — those are covered in the `01-autoscaling` demo.
+are not included — those are covered in the `01-hpa-basic` demo.
 
 #### 13.1 `Pods` Type — Prometheus Adapter
 
@@ -1102,7 +1102,7 @@ Metrics:
 
 ```
 # Observation: "on container \"app\"" confirms this HPA is scoped to one
-# container — unlike Resource's "on pods" wording from 01-autoscaling.
+# container — unlike Resource's "on pods" wording from 01-hpa-basic.
 ```
 
 **Burn CPU in the `sidecar` container — open a second terminal and run:**
@@ -1194,7 +1194,7 @@ spec:
       stabilizationWindowSeconds: 0  # scale up immediately (default)
       selectPolicy: Max
       policies:
-        - type: Percent              # Percent, not Pods (compare with 01-autoscaling Step 8)
+        - type: Percent              # Percent, not Pods (compare with 01-hpa-basic Step 8)
           value: 100                 # double current replica count...
           periodSeconds: 30          # ...at most once per 30 seconds
     scaleDown:
@@ -1235,7 +1235,7 @@ kubectl exec deploy/multi-container-app -c app -- \
 kubectl get hpa app-hpa-behavior-percent -w
 ```
 
-**Expected output — doubling pattern (compare with 01-autoscaling Step 8's linear `+4`):**
+**Expected output — doubling pattern (compare with 01-hpa-basic Step 8's linear `+4`):**
 ```
 NAME                      REFERENCE                       TARGETS          MINPODS  MAXPODS  REPLICAS
 app-hpa-behavior-percent  Deployment/multi-container-app  cpu: 115%/50%    1        10       1
@@ -1266,7 +1266,7 @@ app-hpa-behavior-percent  Deployment/multi-container-app  cpu: 0%/50%   1       
 ```
 # Observation: scaleDown waits 60s (stabilisation window) before the
 # first step, then removes ~50% of current replicas per 60s — compare
-# with 01-autoscaling Step 8's Pods-based "-2 per 60s" scaleDown.
+# with 01-hpa-basic Step 8's Pods-based "-2 per 60s" scaleDown.
 ```
 
 **Cleanup:**
@@ -1333,9 +1333,9 @@ No resources found in default namespace.
 ```
 
 ```
-# Observation: unlike 01-autoscaling Step 13 (uninstalling VPA), this lab
+# Observation: unlike 01-hpa-basic Step 13 (uninstalling VPA), this lab
 # installed nothing cluster-wide — metrics-server stays enabled for use
-# by 03-vpa-advanced and later labs.
+# by 03-vpa-fundamentals and later labs.
 ```
 
 ---
@@ -1347,7 +1347,7 @@ In this lab, you:
 - ✅ Configured `ContainerResource` to scale based on one container's CPU, isolating it from sidecar noise
 - ✅ Demonstrated that `Resource`-type HPA averages across ALL containers, while `ContainerResource` does not
 - ✅ Configured HPA `behavior` with `Percent`-type policies and observed the doubling/halving step pattern
-- ✅ Compared `Percent`-type step sizes against `01-autoscaling`'s `Pods`-type steps
+- ✅ Compared `Percent`-type step sizes against `01-hpa-basic`'s `Pods`-type steps
 - ✅ Explained the Custom Metrics API and the `Pods`/`Object` HPA metric types
 - ✅ Explained the External Metrics API and metrics adapter architecture (Prometheus Adapter, CloudWatch adapter, KEDA)
 - ✅ Built a decision framework covering all five HPA metric types
@@ -1572,7 +1572,7 @@ Metrics:
 
 **Fix:** Add `resources.requests.cpu` to the `sidecar` container (e.g. `cpu: "100m"`, matching `01-deployment-sidecar.yaml`).
 
-**Cascade:** Same root cause as `01-autoscaling`'s documented `<unknown>` troubleshooting entry — but here it is caused by ONE container out of several, easy to miss when skimming a multi-container manifest.
+**Cascade:** Same root cause as `01-hpa-basic`'s documented `<unknown>` troubleshooting entry — but here it is caused by ONE container out of several, easy to miss when skimming a multi-container manifest.
 
 </details>
 
@@ -1694,7 +1694,7 @@ kubectl get apiservices | grep metrics
 kubectl get hpa
 # More than one HPA on the same scaleTargetRef causes ambiguous
 # scaling decisions. Delete the extra one — one HPA per workload,
-# same rule as 01-autoscaling.
+# same rule as 01-hpa-basic.
 ```
 
 **`kubectl exec ... dd` loop does not raise CPU usage:**
@@ -1719,7 +1719,7 @@ kubectl exec deploy/multi-container-app -c <container> -- which dd sh
 "How do you configure an HPA to scale based only on the app container CPU, ignoring a noisy sidecar?","Use type: ContainerResource with containerResource.container: app (plus name: cpu and a target block). Stable since Kubernetes v1.30, works with metrics-server alone — no adapter needed.","02-hpa-advanced,hpa,containerresource,syntax"
 "What does kubectl describe hpa show in the Metrics section for a ContainerResource HPA vs a Resource HPA?","ContainerResource: resource cpu on container app (as a percentage of request): X% / 50%. Resource: resource cpu on pods (as a percentage of request): X% / 50%. The wording difference confirms which scope the metric covers.","02-hpa-advanced,hpa,containerresource,commands"
 "An HPA has behavior.scaleUp.policies: [{type: Percent, value: 100, periodSeconds: 30}]. Metric suggests desired 8 replicas, current is 1. After the first 30-second evaluation, how many replicas?","2 — not 8. A Percent policy caps the step at 100% of the CURRENT replica count per period (1 to 2). Reaching 8 takes multiple periods: 1, 2, 4, 8.","02-hpa-advanced,hpa,behavior,percent"
-"01-autoscaling scaleUp policy was {type: Pods, value: 4, periodSeconds: 15}. Starting from 1 replica with high demand, how does its growth pattern differ from Percent value: 100?","Pods value: 4 is linear — adds at most 4 per period (1, 5, 9...). Percent value: 100 is relative — at most doubles per period (1, 2, 4, 8...). Percent grows faster at large replica counts, slower at small ones.","02-hpa-advanced,hpa,behavior,percent,pods"
+"01-hpa-basic scaleUp policy was {type: Pods, value: 4, periodSeconds: 15}. Starting from 1 replica with high demand, how does its growth pattern differ from Percent value: 100?","Pods value: 4 is linear — adds at most 4 per period (1, 5, 9...). Percent value: 100 is relative — at most doubles per period (1, 2, 4, 8...). Percent grows faster at large replica counts, slower at small ones.","02-hpa-advanced,hpa,behavior,percent,pods"
 "behavior.scaleUp.stabilizationWindowSeconds is set to 300. Manifest applies with no errors. HPA metric shows high CPU but replica count does not increase for 5 minutes. What is wrong?","300 is the scale-down default copy-pasted into scaleUp by mistake. Valid YAML, applies cleanly, no error message. Fix: set scaleUp.stabilizationWindowSeconds to 0 (the scale-up default) or remove it.","02-hpa-advanced,break-fix,behavior"
 "kubectl describe hpa shows resource cpu on pods: unknown / 50%. kubectl top pod shows the main container using CPU normally. Most likely cause?","At least one container in the pod is missing resources.requests.cpu. For Resource-type HPA, if ANY container lacks the cpu request the WHOLE pod metric becomes unknown — not just that container's share. Confirm with kubectl describe deployment for every container's Requests block.","02-hpa-advanced,break-fix,unknown-metric"
 "What command shows per-container CPU and memory within a multi-container pod, not just pod-level totals?","kubectl top pod --containers — breaks down kubectl top pod output by container, essential for diagnosing whether an HPA should use Resource or ContainerResource.","02-hpa-advanced,commands,diagnostics"
@@ -1745,7 +1745,7 @@ kubectl exec deploy/multi-container-app -c <container> -- which dd sh
 # Quiz — 11-auto-scaling/02-hpa-advanced: HPA Advanced — ContainerResource, Percent Behavior, and the Custom/External Metrics Pipeline
 
 > One correct answer per question unless stated otherwise.
-> Target: 7/8 or above before moving to 03-vpa-advanced.
+> Target: 7/8 or above before moving to 03-vpa-fundamentals.
 
 **Q1. You have a 2-container pod (`app` + `sidecar`) and apply an HPA with `type: Resource` targeting CPU. The `sidecar` starts consuming significant CPU. What is the risk?**
 
@@ -1801,7 +1801,7 @@ Trap A: the policy is a rate limiter, not a pass-through. Trap B: value: 100 mea
 
 ---
 
-**Q4. 01-autoscaling's scaleUp policy was `{type: Pods, value: 4, periodSeconds: 15}`. This lab's is `{type: Percent, value: 100, periodSeconds: 30}`. Starting from 10 replicas with sustained high demand, which adds more replicas in the first 30 seconds?**
+**Q4. 01-hpa-basic's scaleUp policy was `{type: Pods, value: 4, periodSeconds: 15}`. This lab's is `{type: Percent, value: 100, periodSeconds: 30}`. Starting from 10 replicas with sustained high demand, which adds more replicas in the first 30 seconds?**
 
 A. The Pods policy — up to 8 replicas (4 per 15s x 2 windows) vs Percent's +10
 B. The Percent policy — up to 10 replicas (100% of 10) vs Pods' +8
@@ -1893,7 +1893,7 @@ Trap A: External requires an adapter. Trap B: Object targeting the Deployment is
 
 | Score | Action |
 |---|---|
-| 8/8 | Import Anki cards, move to 03-vpa-advanced |
+| 8/8 | Import Anki cards, move to 03-vpa-fundamentals |
 | 7/8 | Review wrong answer, proceed |
 | 6/8 | Re-read relevant section, retry those questions |
 | Below 6/8 | Re-read full lab and redo walkthrough before proceeding |

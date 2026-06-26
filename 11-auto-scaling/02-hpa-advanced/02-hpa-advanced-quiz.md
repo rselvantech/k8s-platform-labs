@@ -149,7 +149,7 @@ Trap A: External requires an adapter. Trap B: Object targeting the Deployment is
 
 | Score | Action |
 |---|---|
-| 8/8 | Import Anki cards, move to 03-vpa-advanced |
+| 8/8 | Import Anki cards, move to 03-vpa-fundamentals |
 | 7/8 | Review wrong answer, proceed |
 | 6/8 | Re-read relevant section, retry those questions |
 | Below 6/8 | Re-read full lab and redo walkthrough before proceeding |

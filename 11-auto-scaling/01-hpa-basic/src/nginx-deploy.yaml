@@ -15,15 +15,15 @@ spec:
       terminationGracePeriodSeconds: 0
       containers:
         - name: nginx
-          image: nginx
+          image: nginx:1.27
           ports:
             - containerPort: 80
           resources:
             requests:
-              cpu: "100m"       # HPA calculates utilisation against this
+              cpu: "100m"      # HPA target = 50% of this = 50m before scaling
               memory: "128Mi"
             limits:
-              cpu: "200m"
+              cpu: "500m"
               memory: "256Mi"
 ---
 apiVersion: v1
@@ -31,6 +31,7 @@ kind: Service
 metadata:
   name: nginx-svc
 spec:
+  type: ClusterIP
   selector:
     app: nginx
   ports:
