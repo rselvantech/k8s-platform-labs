@@ -2,7 +2,7 @@
 
 | Topic | Prior demos | `04-keda-adapter` |
 |---|---|---|
-| KEDA overview (role, scale-to-zero, adapter) | `01-autoscaling` brief; `02-hpa-advanced` §10 theory | ✅ full architecture + hands-on |
+| KEDA overview (role, scale-to-zero, adapter) | `01-hpa-basic` brief; `02-hpa-advanced` §10 theory | ✅ full architecture + hands-on |
 | ScaledObject CRD | Not covered | ✅ |
 | ScaledJob CRD | Not covered | ✅ |
 | TriggerAuthentication / ClusterTriggerAuthentication | Not covered | ✅ |
@@ -17,7 +17,7 @@
 
 ## Lab Overview
 
-`01-autoscaling` showed that HPA's `minReplicas` must be ≥ 1 — it cannot scale to zero. For event-driven workloads like message queue consumers, running idle workers 24/7 waiting for work that may not arrive for hours is pure waste. KEDA solves this by adding scale-to-zero and scale-from-zero capability, plus 50+ built-in scalers that remove the need to install and configure a separate metrics adapter for each event source.
+`01-hpa-basic` showed that HPA's `minReplicas` must be ≥ 1 — it cannot scale to zero. For event-driven workloads like message queue consumers, running idle workers 24/7 waiting for work that may not arrive for hours is pure waste. KEDA solves this by adding scale-to-zero and scale-from-zero capability, plus 50+ built-in scalers that remove the need to install and configure a separate metrics adapter for each event source.
 
 KEDA does not replace HPA. It extends HPA — under the hood, KEDA creates and manages HPA objects on your behalf, and feeds them metric values through its own built-in metrics server. The result is that your Deployments still scale via the familiar Kubernetes reconciliation loop, but KEDA adds the ability to go all the way to zero replicas when the event source is empty.
 
@@ -42,10 +42,10 @@ KEDA does not replace HPA. It extends HPA — under the hood, KEDA creates and m
 ## Prerequisites
 
 **Required Software:**
-- Minikube `3node` profile — same cluster used in `01-autoscaling`–`03-vpa-advanced`
+- Minikube `3node` profile — same cluster used in `01-hpa-basic`–`03-vpa-fundamentals`
 - kubectl installed and configured
 - Helm v3 (for KEDA installation)
-- metrics-server enabled (already done in `01-autoscaling` Step 1)
+- metrics-server enabled (already done in `01-hpa-basic` Step 1)
 
 **Verify before starting:**
 ```bash
@@ -55,9 +55,9 @@ helm version --short
 ```
 
 **Knowledge Requirements:**
-- **REQUIRED:** Completion of `01-autoscaling` — HPA architecture, the HPA metrics pipeline, scale subresource, HPA v2 API
+- **REQUIRED:** Completion of `01-hpa-basic` — HPA architecture, the HPA metrics pipeline, scale subresource, HPA v2 API
 - **REQUIRED:** Completion of `02-hpa-advanced` — HPA metric types (especially `External` type), adapter architecture, `external.metrics.k8s.io`
-- **RECOMMENDED:** Completion of `03-vpa-advanced` — useful for understanding how KEDA coexists with VPA
+- **RECOMMENDED:** Completion of `03-vpa-fundamentals` — useful for understanding how KEDA coexists with VPA
 
 ---
 
@@ -85,12 +85,12 @@ By the end of this lab, you will be able to:
 ├── 04-keda-adapter-anki.csv                       # Anki flashcard deck
 ├── 04-keda-adapter-quiz.md                        # standalone quiz
 └── src/
-    ├── redis-deploy.yaml                   # Redis deployment for Redis scaler demo
-    ├── worker-deploy.yaml                  # worker Deployment — target of all ScaledObjects
-    ├── scaledobject-prometheus.yaml        # ScaledObject — Prometheus scaler
-    ├── scaledobject-redis.yaml             # ScaledObject — Redis list scaler
-    ├── scaledobject-cron.yaml              # ScaledObject — Cron scaler
-    ├── triggerauth-redis.yaml              # TriggerAuthentication example
+    ├── 01-redis-deploy.yaml                   # Redis deployment for Redis scaler demo
+    ├── 02-worker-deploy.yaml                  # worker Deployment — target of all ScaledObjects
+    ├── 03-scaledobject-prometheus.yaml        # ScaledObject — Prometheus scaler
+    ├── 04-scaledobject-redis.yaml             # ScaledObject — Redis list scaler
+    ├── 05-scaledobject-cron.yaml              # ScaledObject — Cron scaler
+    ├── 06-triggerauth-redis.yaml              # TriggerAuthentication example
     └── break-fix/
         ├── 01-scaledobject-wrong-target.yaml     # broken: scaleTargetRef name mismatch
         ├── 02-scaledobject-missing-auth.yaml     # broken: Redis scaler without TriggerAuth
@@ -99,9 +99,9 @@ By the end of this lab, you will be able to:
 
 ---
 
-## Recall Check — 03-vpa-advanced
+## Recall Check — 03-vpa-fundamentals
 
-Answer from memory before continuing — these are scenario questions from `03-vpa-advanced`.
+Answer from memory before continuing — these are scenario questions from `03-vpa-fundamentals`.
 
 1. You apply a VPA with `updateMode: "Recreate"` to a Deployment with `replicas: 1`. After a recommendation appears, the pod is evicted. What recreates it, and what determines the resource requests the new pod starts with?
 2. `kubectl describe vpa` shows `Target: cpu=50m` and `Uncapped Target: cpu=200m`. What does this tell you, and what would you check or change?
@@ -506,7 +506,7 @@ v1beta1.external.metrics.k8s.io   keda/keda-operator-metrics-apiserver   True   
 
 This Deployment represents a queue consumer — it will be the target of all ScaledObjects in this lab.
 
-**`src/worker-deploy.yaml`:**
+**`src/02-worker-deploy.yaml`:**
 ```yaml
 apiVersion: apps/v1
 kind: Deployment
@@ -539,7 +539,7 @@ spec:
 ```bash
 cd 11-auto-scaling/04-keda-adapter/src
 
-kubectl apply -f worker-deploy.yaml
+kubectl apply -f 02-worker-deploy.yaml
 kubectl rollout status deployment/worker
 kubectl get pods -l app=worker
 ```
@@ -561,7 +561,7 @@ This step uses the `kube-prometheus-stack` Prometheus instance (installed in `ku
 
 The Prometheus scaler queries a PromQL expression. We will scale the worker based on the number of Kubernetes pods running in the default namespace — a simple metric available without any application changes, purely to demonstrate the scaler mechanics.
 
-**`src/scaledobject-prometheus.yaml`:**
+**`src/03-scaledobject-prometheus.yaml`:**
 ```yaml
 apiVersion: keda.sh/v1alpha1
 kind: ScaledObject
@@ -588,7 +588,7 @@ spec:
 ```
 
 ```bash
-kubectl apply -f scaledobject-prometheus.yaml
+kubectl apply -f 03-scaledobject-prometheus.yaml
 kubectl get scaledobject worker-prometheus-scaler
 ```
 
@@ -645,7 +645,7 @@ keda-hpa-worker-prometheus-scaler  3/2 (avg)     1        5        2
 
 Cleanup:
 ```bash
-kubectl delete -f scaledobject-prometheus.yaml
+kubectl delete -f 03-scaledobject-prometheus.yaml
 # KEDA automatically deletes the keda-hpa-worker-prometheus-scaler HPA
 kubectl get hpa
 # No HPAs should remain
@@ -657,7 +657,7 @@ kubectl get hpa
 
 Redis will serve as the event source for the Redis scaler in Step 5.
 
-**`src/redis-deploy.yaml`:**
+**`src/01-redis-deploy.yaml`:**
 ```yaml
 apiVersion: apps/v1
 kind: Deployment
@@ -701,7 +701,7 @@ spec:
 ```
 
 ```bash
-kubectl apply -f redis-deploy.yaml
+kubectl apply -f 01-redis-deploy.yaml
 kubectl rollout status deployment/redis
 kubectl get pods -l app=redis
 ```
@@ -729,7 +729,7 @@ PONG
 
 The Redis scaler monitors the length of a Redis list. When the list is empty, worker scales to 0. When items are pushed, worker scales up.
 
-**`src/scaledobject-redis.yaml`:**
+**`src/04-scaledobject-redis.yaml`:**
 ```yaml
 apiVersion: keda.sh/v1alpha1
 kind: ScaledObject
@@ -752,7 +752,7 @@ spec:
 ```
 
 ```bash
-kubectl apply -f scaledobject-redis.yaml
+kubectl apply -f 04-scaledobject-redis.yaml
 
 # Watch for scale-to-zero (cooldownPeriod=30s after queue empty)
 kubectl get scaledobject worker-redis-scaler -w &
@@ -852,7 +852,7 @@ worker-bbbbbbbb-bbbbb      1/1     Terminating
 
 ```bash
 kill $SO_PID $POD_PID 2>/dev/null
-kubectl delete -f scaledobject-redis.yaml
+kubectl delete -f 04-scaledobject-redis.yaml
 ```
 
 ---
@@ -861,7 +861,7 @@ kubectl delete -f scaledobject-redis.yaml
 
 The Cron scaler scales based on a schedule — no external event source required. Useful for predictable load patterns (business hours, batch windows, overnight maintenance).
 
-**`src/scaledobject-cron.yaml`:**
+**`src/05-scaledobject-cron.yaml`:**
 ```yaml
 apiVersion: keda.sh/v1alpha1
 kind: ScaledObject
@@ -889,7 +889,7 @@ spec:
 > ```
 
 ```bash
-kubectl apply -f scaledobject-cron.yaml
+kubectl apply -f 05-scaledobject-cron.yaml
 
 # Watch for cron window to open
 kubectl get scaledobject worker-cron-scaler -w
@@ -936,7 +936,7 @@ kubectl get pods -l app=worker -w
 ```
 
 ```bash
-kubectl delete -f scaledobject-cron.yaml
+kubectl delete -f 05-scaledobject-cron.yaml
 ```
 
 ---
@@ -997,7 +997,7 @@ Full hands-on with real SQS queue, IRSA setup, and end-to-end verification: `aws
 
 For secured Redis instances (Redis AUTH), KEDA uses a TriggerAuthentication that references a Kubernetes Secret:
 
-**`src/triggerauth-redis.yaml`:**
+**`src/06-triggerauth-redis.yaml`:**
 ```yaml
 apiVersion: v1
 kind: Secret
@@ -1056,12 +1056,12 @@ TriggerAuthentication flow:
 
 ```bash
 # Remove all demo resources
-kubectl delete -f worker-deploy.yaml --ignore-not-found
-kubectl delete -f redis-deploy.yaml --ignore-not-found
-kubectl delete -f scaledobject-prometheus.yaml --ignore-not-found
-kubectl delete -f scaledobject-redis.yaml --ignore-not-found
-kubectl delete -f scaledobject-cron.yaml --ignore-not-found
-kubectl delete -f triggerauth-redis.yaml --ignore-not-found
+kubectl delete -f 02-worker-deploy.yaml --ignore-not-found
+kubectl delete -f 01-redis-deploy.yaml --ignore-not-found
+kubectl delete -f 03-scaledobject-prometheus.yaml --ignore-not-found
+kubectl delete -f 04-scaledobject-redis.yaml --ignore-not-found
+kubectl delete -f 05-scaledobject-cron.yaml --ignore-not-found
+kubectl delete -f 06-triggerauth-redis.yaml --ignore-not-found
 
 # Verify no ScaledObjects or HPAs remain
 kubectl get scaledobject
@@ -1248,7 +1248,7 @@ spec:
 
 ```bash
 # First ensure a ScaledObject exists on worker
-kubectl apply -f scaledobject-redis.yaml
+kubectl apply -f 04-scaledobject-redis.yaml
 
 # Then apply the conflicting manual HPA
 kubectl apply -f break-fix/03-scaledobject-conflict-hpa.yaml
@@ -1308,27 +1308,28 @@ TriggerAuthentication is a namespace-scoped CRD that stores credentials (typical
 
 ---
 
-## Cert Tips
+## CKA/CKAD Certification Tips
 
 ### Exam Objective Mapping
 
-| Demo concept / command | Exam objective | Notes |
-|---|---|---|
-| ScaledObject CRD — structure and fields | CKA-domain2 — Workloads & Scheduling | Know `scaleTargetRef`, `triggers`, `minReplicaCount`, `cooldownPeriod` |
-| KEDA manages HPA — do not create manual HPA alongside | CKA-domain5 — Troubleshooting | AmbiguousSelector is the failure mode; delete the manual HPA to fix |
-| Scale-to-zero sequence (KEDA Operator, not HPA) | CKA-domain2 — Workloads & Scheduling | HPA takes to 1; KEDA takes to 0 — two-component mechanism |
-| TriggerAuthentication vs plaintext in metadata | CKA-domain4 — Services & Networking / Security | Never put credentials in ScaledObject metadata; always use TriggerAuthentication + Secret |
-| `kubectl get scaledobject` — READY/ACTIVE/FALLBACK columns | CKA-domain5 — Troubleshooting | READY=False -> scaler cannot reach source or target not found; ACTIVE=False -> metric at zero |
+| Demo concept / command | CKA objective | CKAD objective | Notes |
+|---|---|---|---|
+| ScaledObject CRD — structure and fields | Workloads & Scheduling (15%) | Application Deployment (20%) | Know `scaleTargetRef`, `triggers`, `minReplicaCount`, `cooldownPeriod` |
+| KEDA manages HPA — no manual HPA alongside | Troubleshooting (30%) | Application Deployment (20%) | `AmbiguousSelector` is the failure mode; delete the manual HPA to fix |
+| Scale-to-zero / scale-from-zero two-component mechanism | Workloads & Scheduling (15%) | Application Deployment (20%) | HPA handles 1↔N; KEDA Operator handles 0↔1 directly |
+| TriggerAuthentication vs plaintext credentials | — | Application Environment, Configuration and Security (25%) | Credential handling is a CKAD-owned concern; not a distinct CKA-weighted item |
+| `kubectl get scaledobject` — READY/ACTIVE/FALLBACK columns | Troubleshooting (30%) | Application Observability and Maintenance (15%) | READY=False → connectivity/target issue; ACTIVE=False → metric below threshold |
+| ScaledJob vs ScaledObject | Workloads & Scheduling (15%) | Application Design and Build (20%) | Same workload-type decision family as choosing Job vs Deployment |
+| Multiple triggers → MAX rule | Workloads & Scheduling (15%) | Application Deployment (20%) | Same MAX rule as HPA's multiple-metric evaluation |
 
 ### Common Exam Traps
 
-| Question pattern | Correct answer | Why wrong answers fail |
+| Scenario | What the task actually requires | Common wrong approach |
 |---|---|---|
-| "KEDA replaces HPA" | False — KEDA creates and manages HPA objects; HPA still does the pod scaling | KEDA extends HPA; it does not bypass or replace the HPA reconciliation loop |
-| "Set `minReplicas: 0` in the HPA to achieve scale-to-zero with KEDA" | False — the KEDA-managed HPA is auto-generated; do not edit it. Use `minReplicaCount: 0` in the ScaledObject | Editing the KEDA-managed HPA is overwritten; `minReplicaCount` in ScaledObject is the correct field |
-| "KEDA Operator handles all scaling from 0 to maxReplicas" | False — KEDA Operator handles 0↔1 only; HPA handles 1↔N | The 1→N portion uses the standard HPA controller with KEDA Metrics Server as the metric source |
-| "pollingInterval controls how fast pods scale up" | False — pollingInterval controls how often the event source is queried; HPA `behavior` controls scaling speed | pollingInterval affects reaction latency to a change; scaling speed is governed by HPA behavior policies |
-| "Delete the KEDA-managed HPA directly to stop scaling" | False — KEDA recreates it; delete the ScaledObject instead | KEDA owns the HPA lifecycle; directly deleting the HPA only stops scaling temporarily |
+| Task deploys a ScaledObject with `minReplicaCount: 0` on a Redis-backed consumer, then edits the resulting HPA directly to change scaling behavior | Recognize the HPA is KEDA-managed (named `keda-hpa-<scaledobject-name>`) — changes belong in the ScaledObject spec, or `advanced.horizontalPodAutoscalerConfig.behavior` | Editing the generated HPA object directly, which KEDA silently overwrites on its next reconcile |
+| Redis queue has been empty for several minutes with `cooldownPeriod: 60`, yet the Deployment is still at 1 replica | Check when the last event actually arrived — `cooldownPeriod` restarts on every non-zero reading, so a recent small event resets the countdown even if the queue looks empty now | Concluding KEDA is malfunctioning and manually scaling the Deployment to 0 |
+| A scaler credential is stored directly in `triggers[].metadata` because the ScaledObject "works" that way | Move the credential into a Secret + TriggerAuthentication, referenced via `authenticationRef` | Leaving the credential inline since it functions correctly — functioning isn't the same as correct |
+| A ScaledObject and a manually-written HPA both end up targeting the same Deployment, and scaling stops entirely | Recognize `AmbiguousSelector` from `kubectl describe scaledobject`, and delete the manual HPA — KEDA owns the HPA lifecycle for any Deployment under a ScaledObject | Deleting and recreating the ScaledObject, which doesn't resolve the conflict since the manual HPA still exists |
 
 ---
 
@@ -1449,8 +1450,8 @@ kubectl get svc -n monitoring | grep prometheus
 "You want KEDA to only activate from zero when the Redis queue has more than 10 items (to avoid cold starts from noise). Which field do you set and where?","Set activationThreshold: 10 in the ScaledObject spec (top-level, not inside triggers). This means KEDA will not start pods from 0 unless the scaler reports > 10 items. The listLength (targetValue) field controls per-pod scaling once active and is separate from activationThreshold.","04-keda-adapter,activationthreshold,scaledobject"
 "The Prometheus scaler in KEDA uses a PromQL query. Does KEDA query Prometheus directly?","Yes. The KEDA Metrics Server executes the PromQL query against the Prometheus HTTP API (serverAddress in trigger metadata). No additional adapter is needed — KEDA's built-in Prometheus scaler knows the Prometheus query format. This differs from the generic Prometheus Adapter (05-prometheus-adapter), which configures HPA to query Prometheus indirectly.","04-keda-adapter,prometheus-scaler,architecture"
 "Why does the SQS scaler require EKS and cannot run on minikube?","SQS GetQueueAttributes requires AWS credentials. The recommended authentication method is IRSA (IAM Role for Service Accounts), which requires EKS control plane integration to link a Kubernetes ServiceAccount to an IAM role. Without IRSA, static AWS credentials in a Kubernetes Secret are an alternative but not recommended for production. The SQS queue itself is also an AWS service.","04-keda-adapter,sqs-scaler,eks"
-"(CKA) A KEDA ScaledObject with minReplicaCount: 0 has had an empty Redis queue for 10 minutes (cooldownPeriod: 60). kubectl get pods shows 0 pods. A new item arrives. Describe the exact sequence of events to reach 2 running pods.","1. KEDA Operator detects metric=1 (> activationThreshold=0). 2. Operator patches Deployment.spec.replicas=1. 3. Pod starts (container pull + init). 4. HPA activates: queries KEDA Metrics Server, gets listLength=1, targetValue=5 per pod. 5. desiredReplicas=ceil[1 x (1/5)]=1. 6. HPA stays at 1 (metric below target). 7. Queue grows to 10: desiredReplicas=ceil[1 x (10/5)]=2. 8. HPA scales to 2.","04-keda-adapter,cka-domain2,scale-from-zero"
-"(CKA) kubectl describe scaledobject shows ScalerNotReady: AmbiguousSelector. What caused this and how do you fix it?","Cause: a manually-created HPA also targets the same Deployment as the ScaledObject. The HPA controller finds multiple HPAs for the same scaleTargetRef and refuses to process either. Fix: kubectl get hpa to identify the manual HPA (the KEDA-managed one is named keda-hpa-<scaledobject-name>); kubectl delete hpa <manual-hpa-name>. KEDA will restore normal operation within one pollingInterval.","04-keda-adapter,cka-domain5,troubleshooting,break-fix"
+""(CKA/CKAD) A KEDA ScaledObject with minReplicaCount: 0 has had an empty Redis queue for 10 minutes (cooldownPeriod: 60). kubectl get pods shows 0 pods. A new item arrives. Describe the exact sequence of events to reach 2 running pods.","1. KEDA Operator detects metric=1 (> activationThreshold=0). 2. Operator patches Deployment.spec.replicas=1. 3. Pod starts (container pull + init). 4. HPA activates: queries KEDA Metrics Server, gets listLength=1, targetValue=5 per pod. 5. desiredReplicas=ceil[1 x (1/5)]=1. 6. HPA stays at 1 (metric below target). 7. Queue grows to 10: desiredReplicas=ceil[1 x (10/5)]=2. 8. HPA scales to 2.","04-keda-adapter,cka-workloads-scheduling,ckad-application-deployment,scale-from-zero"
+"(CKA/CKAD) kubectl describe scaledobject shows ScalerNotReady: AmbiguousSelector. What caused this and how do you fix it?","Cause: a manually-created HPA also targets the same Deployment as the ScaledObject. The HPA controller finds multiple HPAs for the same scaleTargetRef and refuses to process either. Fix: kubectl get hpa to identify the manual HPA (the KEDA-managed one is named keda-hpa-<scaledobject-name>); kubectl delete hpa <manual-hpa-name>. KEDA will restore normal operation within one pollingInterval.","04-keda-adapter,cka-troubleshooting,ckad-observability-maintenance,break-fix"
 ```
 
 ---
@@ -1677,7 +1678,7 @@ Trap A: replica count behaviour depends on `restoreToOriginalReplicaCount`. Trap
 
 ---
 
-**Q13. (CKA-style) You have a KEDA ScaledObject with `minReplicaCount: 0` and `cooldownPeriod: 60`. The Redis queue has been empty for 2 minutes. `kubectl get pods -l app=worker` shows 1 running pod. What is the most likely cause?**
+**Q13. (CKA/CKAD-style) You have a KEDA ScaledObject with `minReplicaCount: 0` and `cooldownPeriod: 60`. The Redis queue has been empty for 2 minutes. `kubectl get pods -l app=worker` shows 1 running pod. What is the most likely cause?**
 
 A. KEDA is malfunctioning — it should have scaled to 0 by now
 B. The cooldownPeriod has not elapsed since the last event (1 event arrived 30 seconds ago)
@@ -1713,7 +1714,7 @@ Trap A: both support Secrets and IRSA. Trap C: ClusterTriggerAuthentication work
 
 ---
 
-**Q15. (CKA-style) A KEDA ScaledObject uses the Prometheus scaler. `READY=False`, with error "error calling Prometheus API". Prometheus is running. What should you check first?**
+**Q15. (CKA/CKAD-style) A KEDA ScaledObject uses the Prometheus scaler. `READY=False`, with error "error calling Prometheus API". Prometheus is running. What should you check first?**
 
 A. Whether the Redis pod is running
 B. The `serverAddress` in the trigger metadata — verify it matches the actual Prometheus ClusterIP service name and port
@@ -1733,7 +1734,7 @@ Trap A: Redis is unrelated to the Prometheus scaler. Trap C: KEDA Metrics Server
 
 | Score | Action |
 |---|---|
-| 15/15 | Import Anki cards, move to 05-prometheus-adapter |
+| 15/15 | Import Anki cards, move to next Demo |
 | 14/15 | Review the wrong answer, then proceed |
 | 13/15 | Re-read the relevant Concepts section, retry those questions |
 | Below 13/15 | Re-read the full lab and redo the walkthrough before proceeding |

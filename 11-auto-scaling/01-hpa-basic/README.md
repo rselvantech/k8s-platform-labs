@@ -2943,9 +2943,10 @@ Trap A: this is not an error — it is expected functioning. Trap C: ScalingLimi
 
 ---
 
+Score guide:
 | Score | Action |
 |---|---|
-| 20/20 | Import Anki cards, move to 02-hpa-advanced |
+| 20/20 | Import Anki cards, move to next Demo |
 | 18–19/20 | Review the wrong answers, then proceed |
 | 17/20 | Re-read relevant Concepts sections, retry those questions |
 | Below 17/20 | Re-read the full lab and redo the walkthrough before proceeding |

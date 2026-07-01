@@ -44,7 +44,7 @@ The Prometheus Adapter sits between Prometheus and the HPA controller. Prometheu
 - Minikube `3node` profile — same cluster as all prior autoscaling demos
 - kubectl installed and configured
 - Helm v3 (used for kube-prometheus-stack and Prometheus Adapter)
-- metrics-server enabled (already done in `01-autoscaling`)
+- metrics-server enabled (already done in `01-hpa-basic`)
 
 **Verify before starting:**
 ```bash
@@ -55,7 +55,7 @@ kubectl top nodes
 ```
 
 **Knowledge Requirements:**
-- **REQUIRED:** Completion of `01-autoscaling` — HPA pipeline, metric types overview
+- **REQUIRED:** Completion of `01-hpa-basic` — HPA pipeline, metric types overview
 - **REQUIRED:** Completion of `02-hpa-advanced` — Custom Metrics API theory, Pods/Object metric types, Prometheus Adapter architecture (Steps 4–5 and API Reference §9)
 - **RECOMMENDED:** Completion of `04-keda-adapter` — useful for understanding how Prometheus Adapter and KEDA differ as adapter implementations
 
@@ -1240,26 +1240,28 @@ The Prometheus Adapter is a lean adapter that implements `custom.metrics.k8s.io`
 
 ---
 
-## Cert Tips
+## CKA/CKAD Certification Tips
 
 ### Exam Objective Mapping
 
-| Demo concept / command | Exam objective | Notes |
-|---|---|---|
-| Prometheus Adapter — implements `custom.metrics.k8s.io` | CKA-domain2 — Workloads & Scheduling | Adapter is separate from metrics-server; metrics-server does NOT serve custom.metrics.k8s.io |
-| ConfigMap rule — four required fields | CKA-domain2 — Workloads & Scheduling | All four required: seriesQuery, resources, name, metricsQuery |
-| `kubectl get --raw /apis/custom.metrics.k8s.io/v1beta1/` | CKA-domain5 — Troubleshooting | Verifies adapter is registered and serving metrics |
-| `type: Object, Value` vs `AverageValue` | CKA-domain2 — Workloads & Scheduling | Value = threshold trigger (no stabilisation); AverageValue = per-pod target (stabilises) |
-| `<unknown>` for custom metrics — adapter troubleshooting | CKA-domain5 — Troubleshooting | Check: APIService True? adapter logs? metric in Prometheus? name matches rule.as? |
+| Demo concept / command | CKA objective | CKAD objective | Notes |
+|---|---|---|---|
+| Prometheus Adapter — implements `custom.metrics.k8s.io` | Workloads & Scheduling (15%) | Application Deployment (20%) | metrics-server never serves `custom.metrics.k8s.io` — single most common misconception on either exam |
+| ConfigMap rule structure — four required fields | Workloads & Scheduling (15%) | Application Deployment (20%) | `seriesQuery`, `resources`, `name`, `metricsQuery` all required |
+| `kubectl get --raw /apis/custom.metrics.k8s.io/v1beta1/...` | Troubleshooting (30%) | Application Observability and Maintenance (15%) | Primary diagnostic command for confirming adapter health and registered metric names |
+| `type: Pods` HPA with a custom per-pod metric | Workloads & Scheduling (15%) | Application Deployment (20%) | Only `AverageValue` is a valid target type for `Pods` |
+| `type: Object` HPA targeting an Ingress metric | Services & Networking (20%) | Services and Networking (20%) | Object type ties scaling to a non-target Kubernetes object (here, an Ingress) |
+| `Value` vs `AverageValue` for Object type | Workloads & Scheduling (15%) | Application Deployment (20%) | `Value` never stabilises as pods scale; `AverageValue` does |
+| Adapter troubleshooting — rule mismatch, metric not found | Troubleshooting (30%) | Application Observability and Maintenance (15%) | Check order: APIService status → adapter logs → Prometheus series → name match |
 
 ### Common Exam Traps
 
-| Question pattern | Correct answer | Why wrong answers fail |
+| Scenario | What the task actually requires | Common wrong approach |
 |---|---|---|
-| "metrics-server serves custom.metrics.k8s.io" | False — metrics-server only serves `metrics.k8s.io` (CPU/memory). `custom.metrics.k8s.io` requires a separate adapter (Prometheus Adapter, KEDA, etc.) | This is the single most common misconception in HPA custom metrics questions |
-| "HPA `type: Object` with `Value` stabilises when pods are added" | False — adding pods does not reduce the Ingress total; `Value` keeps comparing the unchanged total to the target and keeps scaling | Stabilisation only happens with `AverageValue` (divides by pod count) |
-| "The Prometheus metric name and the HPA metric name must match" | False — the adapter's `name.as` field transforms the Prometheus name to the Custom Metrics API name; they are often different (e.g. `http_requests_total` → `http_requests_per_second`) | Confusing the Prometheus series name with the Custom Metrics API name causes HPA to reference the wrong metric |
-| "Prometheus needs special configuration to support HPA" | False — Prometheus only needs to be scraping the relevant metrics. All configuration for the HPA integration lives in the Prometheus Adapter's ConfigMap | Prometheus has no awareness of HPA or the Custom Metrics API |
+| Task expects an HPA with `type: Pods` targeting a custom metric to work as soon as metrics-server is confirmed healthy | Recognize metrics-server never serves `custom.metrics.k8s.io` — a separate adapter must be installed with a matching ConfigMap rule before any custom metric is available | Troubleshooting metrics-server health/logs when the actual gap is a missing or misconfigured Custom Metrics adapter |
+| Task's HPA references `metric.name: http_requests_total` (the raw Prometheus counter name) and stays `<unknown>` even though the metric is clearly present in Prometheus | Trace the adapter ConfigMap's `name.as` field — the Custom Metrics API only exposes the transformed name (e.g. `http_requests_per_second`), and the HPA must reference that exact name | Re-checking Prometheus scrape configuration when the mismatch is actually between the HPA spec and the adapter's name-transform rule |
+| Task creates an HPA with `type: Object` and `target.type: Value` against an Ingress, and expects it to stabilise as replicas increase | Recognize `Value` compares the raw object total directly to the target — Ingress request rate doesn't drop as backend pods increase — so it scales to `maxReplicas` and stays there; switch to `AverageValue` | Repeatedly raising `maxReplicas` to "give it more room," instead of changing the target type |
+| Task's `resources.overrides` block maps a label name that doesn't actually exist on the Prometheus series being queried | Confirm the left-hand label name in `resources.overrides` matches an actual label present on the target Prometheus series — a mismatch produces empty results with no explicit error | Assuming the empty Custom Metrics API response means the metric hasn't been scraped yet, and waiting rather than checking the rule's label mapping |
 
 ---
 
@@ -1363,7 +1365,7 @@ kubectl describe pod -l app=sample-app | grep prometheus
 "What does resources.overrides do in the Prometheus Adapter ConfigMap rule?","Maps Prometheus label names to Kubernetes resource types. This tells the adapter which Kubernetes object each metric belongs to. For example: pod: {resource: pod} maps the Prometheus 'pod' label to Kubernetes pod resources. For non-core resources like Ingress: ingress: {group: networking.k8s.io, resource: ingresses}. Without this mapping, the adapter cannot link the metric to a Kubernetes object and returns empty results.","05-prometheus-adapter,configmap-rules,resources-overrides"
 "What Prometheus configuration is needed to support HPA via Prometheus Adapter?","Nothing. Prometheus only needs to already be scraping the relevant application metrics. All HPA integration configuration lives in the Prometheus Adapter ConfigMap. Prometheus has no awareness of HPA, the Custom Metrics API, or the adapter.","05-prometheus-adapter,prometheus-config"
 "How do the Prometheus Adapter and KEDA differ for custom metric HPA scaling?","Prometheus Adapter: implements custom.metrics.k8s.io only via Prometheus backend; HPA creates and manages its own scaling objects; no scale-to-zero. KEDA: full event-driven framework; bundles 50+ scalers (Prometheus, Redis, Kafka, SQS, cron, etc.); creates and manages HPA objects on your behalf; supports scale-to-zero. Use Adapter when you only need Prometheus metrics with standard HPA semantics. Use KEDA for scale-to-zero, multiple event sources, or event-driven workloads.","05-prometheus-adapter,keda,comparison"
-"(CKA) An HPA with type: Pods shows <unknown> for http_requests_per_second. kubectl get apiservices shows custom.metrics.k8s.io=True. kubectl get --raw /apis/custom.metrics.k8s.io/v1beta1/ shows the metric is listed. What should you check next?","The metric name in the HPA spec (metric.name) may not exactly match the name listed in the Custom Metrics API. Check kubectl describe hpa for the exact error message. Verify: (1) spelling and case match the adapter rule name.as exactly; (2) the metric is listed under the correct namespace and resource type; (3) the Prometheus time series has recent data (rate() returns 0 if series is stale).","05-prometheus-adapter,cka-domain5,troubleshooting"
+"(CKA/CKAD) An HPA with type: Pods shows <unknown> for http_requests_per_second. kubectl get apiservices shows custom.metrics.k8s.io=True. kubectl get --raw /apis/custom.metrics.k8s.io/v1beta1/ shows the metric is listed. What should you check next?","The metric name in the HPA spec (metric.name) may not exactly match the name listed in the Custom Metrics API. Check kubectl describe hpa for the exact error message. Verify: (1) spelling and case match the adapter rule name.as exactly; (2) the metric is listed under the correct namespace and resource type; (3) the Prometheus time series has recent data (rate() returns 0 if series is stale).","05-prometheus-adapter,cka-troubleshooting,ckad-observability-maintenance,troubleshooting"
 ```
 
 ---
@@ -1553,7 +1555,7 @@ Both **B and C** are invalid for Pods type — but since the question asks for N
 
 ---
 
-**Q11. (CKA-style) You installed the Prometheus Adapter and `kubectl get apiservices` shows `v1beta1.custom.metrics.k8s.io=True`. But `kubectl get --raw /apis/custom.metrics.k8s.io/v1beta1/` returns an empty list. What does this tell you?**
+**Q11. (CKA/CKAD-style) You installed the Prometheus Adapter and `kubectl get apiservices` shows `v1beta1.custom.metrics.k8s.io=True`. But `kubectl get --raw /apis/custom.metrics.k8s.io/v1beta1/` returns an empty list. What does this tell you?**
 
 A. The adapter is not running
 B. The adapter is running and registered, but no ConfigMap rules matched any Prometheus series — no metrics are being exposed
@@ -1571,7 +1573,7 @@ Trap A: if the adapter were not running, APIService would show False. Trap C: if
 
 ---
 
-**Q12. (CKA-style) After applying an Ingress and configuring a Prometheus Adapter Object-type rule, you notice the nginx_ingress_requests_per_second metric appears in `/apis/custom.metrics.k8s.io/v1beta1/` but the HPA shows `<unknown>`. The HPA spec shows `describedObject.kind: Ingress, name: my-ingress`. What should you check?**
+**Q12. (CKA/CKAD-style) After applying an Ingress and configuring a Prometheus Adapter Object-type rule, you notice the nginx_ingress_requests_per_second metric appears in `/apis/custom.metrics.k8s.io/v1beta1/` but the HPA shows `<unknown>`. The HPA spec shows `describedObject.kind: Ingress, name: my-ingress`. What should you check?**
 
 A. Whether the Ingress exists in the same namespace as the HPA
 B. Whether metrics-server is running
@@ -1591,7 +1593,7 @@ Trap B: metrics-server serves `metrics.k8s.io`, not custom metrics — irrelevan
 
 | Score | Action |
 |---|---|
-| 12/12 | Import Anki cards, move to 06-cluster-autoscaler |
+| 12/12 | Import Anki cards, move to next Demo |
 | 11/12 | Review the wrong answer, then proceed |
 | 10/12 | Re-read the relevant Concepts section, retry those questions |
 | Below 10/12 | Re-read the full lab and redo the walkthrough before proceeding |

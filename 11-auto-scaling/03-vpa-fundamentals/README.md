@@ -74,6 +74,7 @@ By the end of this lab, you will be able to:
     ├── 01-nginx-deploy.yaml               # nginx deployment + ClusterIP service
     ├── 02-vpa-off.yaml                    # VPA Off mode — recommendations only
     ├── 03-vpa-recreate.yaml               # VPA Recreate mode — auto resource update
+    ├── 04-vpa-conflict.yaml               # VPA + HPA Conflict Demo
     └── break-fix/
         ├── 01-vpa-standalone-pod.yaml           # broken: VPA targeting a standalone pod
         ├── 02-vpa-conflict-hpa-cpu.yaml         # broken: HPA CPU + VPA Recreate CPU
@@ -1806,7 +1807,7 @@ kubectl delete -f 02-vpa-off.yaml
 
 ---
 
-### Step 2b — VPA Initial Mode
+### Step 3 — VPA Initial Mode
 
 Initial mode injects resources only at pod creation time — it never evicts running pods. This is the safest active VPA mode for production: existing pods are untouched, but every new pod (from scaling, rolling update, or manual restart) starts with right-sized resources.
 
@@ -1853,7 +1854,7 @@ Requests:
 ```
 ---
 
-### Step 3 — VPA Recreate Mode (Automatic Resource Adjustment)
+### Step 4 — VPA Recreate Mode (Automatic Resource Adjustment)
 
 Recreate mode evicts pods and recreates them with recommended resource requests injected by the Admission Controller.
 
@@ -2004,112 +2005,7 @@ kubectl describe vpa nginx-vpa-recreate | grep -A20 "Recommendation:"
 
 ---
 
-### Step 4 — VPA + HPA Conflict Demo
-
-This step demonstrates the conflict that occurs when **HPA on CPU/memory** runs simultaneously with **VPA in Recreate mode on CPU/memory**. This is NOT a general statement that HPA and VPA cannot coexist — they can and do in production. The conflict is specific to both tools targeting the same signal (CPU/memory requests) at the same time.
-
-> **Safe combinations that avoid this conflict:**
-> - HPA on CPU/memory + VPA in Off mode (VPA recommends only — no request changes)
-> - HPA on custom/external metrics + VPA in Recreate mode (different signals — no interference)
-> - All three (HPA + VPA + CA) with a safe HPA+VPA combination
-
-```bash
-# Apply the HPA on CPU first
-kubectl apply -f 01-nginx-deploy.yaml
-```
-
-**`src/vpa-conflict.yaml` (this is the conflicting combination):**
-```yaml
-apiVersion: autoscaling.k8s.io/v1
-kind: VerticalPodAutoscaler
-metadata:
-  name: nginx-vpa-conflict
-spec:
-  targetRef:
-    apiVersion: apps/v1
-    kind: Deployment
-    name: nginx-deploy
-  updatePolicy:
-    updateMode: "Recreate"    # ← will conflict with HPA below
-  resourcePolicy:
-    containerPolicies:
-      - containerName: nginx
-        minAllowed:
-          cpu: 50m
-          memory: 64Mi
-        maxAllowed:
-          cpu: 1
-          memory: 1Gi
-```
-
-```bash
-# Create HPA on CPU (same signal VPA will also manage)
-kubectl autoscale deployment nginx-deploy --min=1 --max=5 --cpu=50%
-
-# Apply conflicting VPA
-kubectl apply -f vpa-conflict.yaml
-
-# Generate load
-kubectl apply -f 01-nginx-deploy.yaml  # ensure nginx-deploy exists
-```
-
-Wait ~2 minutes, then observe:
-```bash
-kubectl get hpa nginx-deploy
-kubectl get vpa nginx-vpa-conflict
-```
-
-**Expected output showing conflict:**
-```
-HPA: cpu: 38%/50%  replicas: 3   ← HPA scaled out under CPU load
-VPA: cpu: 143m     provided: True ← VPA raised CPU request to 143m
-
-After VPA raises requests:
-  HPA sees: 38%/50% (with higher request denominator → lower %)
-  HPA might scale DOWN ← conflict with HPA scaling up
-```
-
-**The conflict cycle:**
-```
-1. Load increases → pod CPU rises to 115% of 100m request
-2. HPA formula: ceil[1 x 115/50] = 3 → scales out to 3 replicas
-3. VPA Recommender builds histogram → Target = 143m
-4. VPA Updater evicts pods → Admission Controller injects cpu=143m
-5. HPA recalculates with NEW request (143m):
-   same ~38m actual CPU usage / 143m request = 27%
-6. 27% is well below 50% target → HPA scales DOWN
-7. Fewer pods → higher per-pod CPU → HPA scales back up
-8. VPA responds to new utilisation pattern → adjusts again
-9. Cycle repeats → neither HPA nor VPA can stabilise
-
-Root cause: VPA changes the denominator (resources.requests) that HPA uses
-to calculate utilisation%. Any change in requests shifts HPA's
-perceived utilisation even if actual CPU usage is unchanged.
-```
-
-**Apply the safe solution — VPA in Off mode alongside HPA:**
-```bash
-kubectl delete -f vpa-conflict.yaml
-
-# Safe: VPA observes and recommends only — never changes requests
-kubectl apply -f 02-vpa-off.yaml
-
-kubectl get hpa nginx-deploy
-kubectl get vpa nginx-vpa-off
-```
-
-```
-# Observation: HPA manages replicas on CPU signal
-#              VPA reports what the requests SHOULD be (Off mode only)
-#              No conflict — VPA is not changing the denominator HPA uses
-```
-
-```bash
-kubectl delete hpa nginx-deploy
-kubectl delete -f 02-vpa-off.yaml
-```
-
-### Step 4 — VPA + HPA Conflict Demo
+### Step 5 — VPA + HPA Conflict Demo
 
 > **Important:** Scale back to 1 replica for this demo, and apply the HPA on CPU.
 > The conflict requires BOTH tools watching CPU simultaneously.
@@ -2464,29 +2360,29 @@ VPACheckpoint is a CRD object automatically created by the VPA Recommender — o
 
 ---
 
-## Cert Tips
+## CKA/CKAD Certification Tips
 
 ### Exam Objective Mapping
 
-| Demo concept / command | Exam objective | Notes |
-|---|---|---|
-| VPA components — Recommender, Updater, Admission Controller | CKA-domain2 — Workloads & Scheduling | Know which component does what; Updater uses Eviction API (unlike HPA) |
-| VPA update modes — Off/Initial/Recreate/InPlaceOrRecreate | CKA-domain2 — Workloads & Scheduling | "Auto" is deprecated — do not use |
-| `kubectl describe vpa` — Target vs Uncapped Target | CKA-domain5 — Troubleshooting | Uncapped ≠ Target means a policy constraint is clamping; diagnose minAllowed/maxAllowed |
-| VPACheckpoint — what it is and why | CKA-domain2 — Workloads & Scheduling | Persists histogram data; auto-managed; one per container per VPA |
-| Standalone pod vs single-pod app | CKA-domain5 — Troubleshooting | VPA cannot target standalone pods — must use Deployment (even replicas: 1) |
-| HPA + VPA safe combinations | CKA-domain2 — Workloads & Scheduling | HPA-CPU + VPA-Recreate-CPU = conflict; HPA-CPU + VPA-Off = safe |
-| VPA Eviction API vs HPA direct DELETE | CKA-domain5 — Troubleshooting | VPA respects PDB; HPA does not |
+| Demo concept / command | CKA objective | CKAD objective | Notes |
+|---|---|---|---|
+| VPA components — Recommender, Updater, Admission Controller | Workloads & Scheduling (15%) | Application Deployment (20%) | Know which component does what; Updater uses Eviction API, unlike HPA |
+| VPA update modes — Off/Initial/Recreate/InPlaceOrRecreate | Workloads & Scheduling (15%) | Application Deployment (20%) | "Auto" is deprecated — do not use |
+| `kubectl describe vpa` — Target vs Uncapped Target | Troubleshooting (30%) | Application Observability and Maintenance (15%) | Diagnostic reading skill tested on both exams |
+| VPACheckpoint — what it is and why | Workloads & Scheduling (15%) | — | Auto-managed persistence detail; more CKA-flavored (cluster-component behaviour) than CKAD |
+| Standalone pod vs single-pod app | Troubleshooting (30%) | Application Design and Build (20%) | VPA cannot target standalone pods; ties to CKAD's workload-type selection objective |
+| HPA + VPA safe combinations | Workloads & Scheduling (15%) | Application Deployment (20%) | Conflict combination (HPA-CPU + VPA-Recreate-CPU) vs safe patterns |
+| Missing `resources.requests` → BestEffort QoS | Troubleshooting (30%) | Application Environment, Configuration and Security (25%) | Resource request ownership sits in CKAD's Environment/Config/Security domain |
+| VPA Eviction API vs HPA direct DELETE (PDB respect) | Troubleshooting (30%) | Application Observability and Maintenance (15%) | Disruption-safety distinction between the two autoscalers |
 
 ### Common Exam Traps
 
-| Question pattern | Correct answer | Why wrong answers fail |
+| Scenario | What the task actually requires | Common wrong approach |
 |---|---|---|
-| "VPA can target a standalone pod in Recreate mode" | False — standalone pods have no controller to recreate after eviction; the pod is permanently deleted | Confusing `Off` mode (safe with standalone pod — never evicts) with Recreate mode |
-| "VPA Updater uses direct DELETE like HPA scale-down" | False — VPA Updater uses the Eviction API; HPA scale-down uses direct DELETE | These are asymmetric by design; VPA respects PDB, HPA does not |
-| "HPA and VPA always conflict when used together" | False — conflict is only HPA-on-CPU + VPA-Recreate-on-CPU; HPA-CPU + VPA-Off and HPA-custom-metrics + VPA-Recreate are both safe | The word "always" is wrong; the specific conflicting combination must be named |
-| "Uncapped Target is the same as Target unless maxAllowed is set" | False — Uncapped Target differs from Target when EITHER minAllowed OR maxAllowed is clamping the recommendation | minAllowed raises the floor (Target > Uncapped), maxAllowed lowers the ceiling (Target < Uncapped) |
-| "'Auto' updateMode is the recommended active VPA mode" | False — "Auto" is deprecated since VPA v1.4+; use Recreate or InPlaceOrRecreate | "Auto" currently maps to Recreate but will be removed in a future API version |
+| Task applies a VPA in Recreate mode directly against a bare Pod object (not a Deployment) and expects safe right-sizing | Recognize VPA needs a controller (Deployment, even `replicas: 1`) to recreate the pod after Updater eviction — retarget the VPA at the Deployment | Leaving the VPA targeting the Pod directly, assuming Off-mode safety extends to Recreate mode too |
+| Task has both an HPA on CPU and a VPA in Recreate mode on CPU targeting the same Deployment, and replica count oscillates without any load change | Recognize the two tools are fighting over the same signal (CPU request) — switch VPA to Off mode, or move HPA to a non-CPU/memory metric | Adjusting HPA thresholds or VPA min/maxAllowed values to "smooth out" the oscillation instead of removing the underlying conflict |
+| `kubectl describe vpa` shows `Target: cpu=50m` and `Uncapped Target: cpu=200m`, and the task asks why the pod still throttles under peak load | Recognize `maxAllowed` is capping the recommendation well below what usage data calls for, and raise `maxAllowed.cpu` accordingly | Treating Target as the "correct" answer and looking for an unrelated cause of the throttling (node capacity, kubelet config) |
+| Task deploys a container with no `resources.requests` at all, applies a VPA in Off mode, and asks whether this is a safe setup | Identify that a pod with no requests is BestEffort QoS — first evicted under node memory pressure — regardless of what VPA reports; set baseline requests before layering VPA on top | Concluding the setup is fine because `kubectl describe vpa` shows `PROVIDED=True` with a valid Target |
 
 ---
 
@@ -2579,3 +2475,200 @@ kubectl logs -n kube-system -l app=vpa-recommender | grep checkpoint
 # May indicate: Recommender pod restarted, or pods have been deleted
 # (no pods to observe = no histogram updates = stale checkpoint)
 ```
+
+## Appendix — Anki Cards
+
+**`03-vpa-fundamentals-anki.csv`:**
+
+```
+#deck:k8s-platform-labs::11-auto-scaling::03-vpa-fundamentals
+#separator:Comma
+#columns:Front,Back,Tags
+"You run `kubectl describe vpa` and see three components mentioned in cluster events: Recommender, Updater, Admission Controller. What does the Recommender actually do?","It watches historical and current resource usage (via metrics-server/cAdvisor) and calculates suggested CPU/memory requests, writing them to the VPA object's status — it never changes a running pod by itself.","demo03,vpa,recommender"
+"Your VPA is in Recreate mode and the Target recommendation changes. What actually causes the pod to update?","The Updater component evicts the pod via the Kubernetes Eviction API (respecting any PodDisruptionBudget) so the owning controller recreates it with the new resource values — the Recommender only calculates, it doesn't act.","demo03,vpa,updater,eviction-api"
+"You set a VPA's updateMode: Recreate on a Deployment that also has a PDB with minAvailable: 100%. What happens when the VPA tries to apply a new recommendation?","The Updater's eviction request is blocked by the Eviction API respecting the PDB — the pod is never evicted, so the new resource values are never applied until the PDB allows an eviction.","demo03,vpa,pdb,eviction-api"
+"What does the Admission Controller component of VPA do, and when does it act?","It intercepts pod creation requests (via a mutating webhook) and rewrites the pod's resources.requests/limits to match the VPA's current recommendation at the moment the pod is created — it never touches an already-running pod.","demo03,vpa,admission-controller"
+"List the four VPA updateMode values in order from least to most disruptive, and note which one is deprecated.","Off (recommend only, no action) then Initial (apply only at pod creation) then Recreate (evict + recreate whenever recommendation changes) then InPlaceOrRecreate (attempts in-place resize first, falls back to recreate). Auto is deprecated — do not use it.","demo03,vpa,update-modes"
+"kubectl describe vpa shows Target: cpu=50m and Uncapped Target: cpu=200m for a container. What does the gap between these two values tell you?","maxAllowed in the VPA's resourcePolicy is capping the recommendation — the Recommender actually wants 200m based on usage data, but the configured ceiling limits what it reports as the applied Target.","demo03,vpa,target,uncapped-target"
+"Why does a VPACheckpoint object exist, and do you need to create or manage it manually?","It's an internal object the VPA Recommender auto-creates and updates to persist historical usage data across Recommender restarts — fully auto-managed, never created or edited manually.","demo03,vpa,vpacheckpoint"
+"You apply a VPA with targetRef pointing directly at a standalone Pod (not a Deployment). What's the practical problem in Recreate mode?","There's no controller to recreate the pod after the Updater evicts it — the pod is simply deleted and never comes back. VPA needs a controller (Deployment, even with replicas: 1) to be usable in Recreate mode.","demo03,vpa,standalone-pod,limitation"
+"A container has no resources.requests set at all. You apply a VPA in Off mode and it reports a valid Target recommendation. Is the workload safe from eviction under node memory pressure?","No — with no resources.requests, the pod's QoS class is BestEffort, making it the first candidate for eviction under node memory pressure, regardless of what the VPA recommends. A valid Target doesn't change the pod's actual QoS until that recommendation is applied.","demo03,vpa,resources-requests,qos,best-effort"
+"A Deployment has an HPA scaling on CPU utilization and a VPA in Recreate mode also targeting CPU on the same Deployment. What's the failure pattern?","Both tools are reacting to the same CPU signal — VPA changes the CPU request (which shifts the utilization percentage HPA calculates), and HPA's replica changes shift per-pod load (which shifts what VPA recommends next). The result is replica count oscillating without any real load change.","demo03,vpa,hpa,conflict"
+"You need to demonstrate why HPA and VPA conflict on the same metric, but you don't want the demo pod to actually get evicted repeatedly. Which VPA mode do you use for the conflict demo, and why?","Off mode — it lets you observe the VPA's recommendation drifting in response to HPA's replica changes (via kubectl describe vpa) without VPA taking any disruptive action, making the conflict visible without added instability.","demo03,vpa,hpa,conflict,off-mode"
+"How does HPA change pod count, and how does that differ mechanically from how VPA Recreate mode changes pod resources?","HPA changes the Deployment's replicas field — the ReplicaSet controller then directly creates or deletes pods to match, with no eviction involved. VPA Recreate mode instead evicts an existing pod via the Eviction API (respecting PDBs) so the controller recreates it with new resource values — same pod count, different resources.","demo03,vpa,hpa,mechanics"
+"What's the practical difference between VPA's Recreate mode and the beta InPlaceOrRecreate mode in terms of pod disruption?","Recreate always evicts and recreates the pod to apply new resource values, causing a brief restart every time. InPlaceOrRecreate first attempts an in-place resize (no restart) and only falls back to evict-and-recreate if the in-place resize isn't possible.","demo03,vpa,inplace-or-recreate"
+"In kubectl describe vpa output, what do the Lower Bound and Upper Bound values represent, separately from Target?","Lower Bound and Upper Bound define the range the Recommender considers acceptable without triggering an update — Target only changes (triggering Updater action in Recreate mode) once actual usage moves outside this range, not on every minor fluctuation.","demo03,vpa,lower-bound,upper-bound"
+"Why can't a single Pod object (created directly, not via a Deployment) benefit from VPA's Initial mode either?","Initial mode only applies the recommendation at pod creation time via the Admission Controller webhook — but a standalone pod, once created, is never recreated by anything if deleted, so there's no future creation event for Initial mode to apply to after the first one.","demo03,vpa,initial-mode,standalone-pod"
+```
+
+## Appendix — Quiz
+
+**`03-vpa-fundamentals-quiz.md`:**
+
+````markdown
+# Quiz — 11-auto-scaling/03-vpa-fundamentals: VPA Fundamentals
+
+> One correct answer per question unless stated otherwise.
+> Target: 80% or above before moving to 04-keda-adapter.
+
+**Q1. You apply a VPA in `Recreate` mode targeting a bare Pod object (not a Deployment). Load increases and the Recommender calculates a new Target. What happens?**
+
+A. The pod's resources update in place with no restart
+B. The Updater evicts the pod via the Eviction API, and it never comes back since there's no controller to recreate it
+C. VPA refuses to accept the target and reports an error
+D. The pod restarts automatically with the same resources unchanged
+
+<details>
+<summary>Answer</summary>
+
+**B** — the Updater evicts, but no controller recreates it.
+Trap: A confuses Recreate with the beta InPlaceOrRecreate mode. C assumes a validation step VPA doesn't perform. D ignores that eviction actually happens.
+
+</details>
+
+---
+
+**Q2. A Deployment's container has no `resources.requests` set. You apply a VPA in `Off` mode and `kubectl describe vpa` shows a healthy Target recommendation. Is the pod protected from eviction under node memory pressure right now?**
+
+A. Yes, because VPA is actively managing it
+B. Yes, because Off mode still applies live resource caps
+C. No — the pod is BestEffort QoS until the recommendation is actually applied
+D. No, but only because Off mode is not a valid VPA mode
+
+<details>
+<summary>Answer</summary>
+
+**C** — a Target recommendation existing doesn't change the pod's actual QoS.
+Trap: A confuses "VPA has an opinion" with "VPA has acted." B misdescribes Off mode, which takes no action at all. D incorrectly claims Off isn't a valid mode.
+
+</details>
+
+---
+
+**Q3. `kubectl describe vpa` shows `Target: cpu=50m`, `Uncapped Target: cpu=200m`. The task asks why the pod still throttles under peak load. What's the correct diagnosis?**
+
+A. The Recommender is malfunctioning and needs a restart
+B. `maxAllowed` in resourcePolicy is capping the applied Target well below actual usage
+C. Metrics-server hasn't scraped recently enough
+D. The pod is in Off mode so no recommendation is ever applied
+
+<details>
+<summary>Answer</summary>
+
+**B** — the gap between Target and Uncapped Target is a deliberate cap, not a pipeline failure.
+Trap: A and C assume something is broken when the values shown are exactly what a `maxAllowed` cap produces. D contradicts the fact that a Target is showing at all.
+
+</details>
+
+---
+
+**Q4. An HPA scales a Deployment on CPU utilization, and a VPA in Recreate mode is also targeting CPU on the same Deployment. Replica count oscillates with no actual load change. What's happening?**
+
+A. HPA and VPA are both broken and need to be recreated
+B. VPA's resource-request changes shift the utilization % HPA calculates, and HPA's replica changes shift what VPA recommends next — feedback loop
+C. This is expected steady-state behavior and requires no fix
+D. The cluster doesn't have enough CPU capacity
+
+<details>
+<summary>Answer</summary>
+
+**B** — the two autoscalers are feeding each other's inputs.
+Trap: C wrongly dismisses a real conflict as normal. A jumps to "broken" instead of "conflicting." D introduces an unrelated capacity explanation.
+
+</details>
+
+---
+
+**Q5. You want to demonstrate the HPA/VPA conflict pattern without the demo pod being repeatedly evicted. Which VPA `updateMode` should you use for this demo?**
+
+A. Recreate
+B. InPlaceOrRecreate
+C. Off
+D. Auto
+
+<details>
+<summary>Answer</summary>
+
+**C** — Off makes recommendations visible without taking disruptive action.
+Trap: A and B both cause real evictions/resizes, defeating the purpose of a clean conflict demo. D is deprecated and shouldn't be used at all.
+
+</details>
+
+---
+
+**Q6. A Deployment has a PDB with `minAvailable: 100%`, and its VPA is in Recreate mode. A new recommendation is calculated. What happens when the Updater tries to apply it?**
+
+A. The Updater bypasses the PDB since VPA changes are considered non-disruptive
+B. The eviction is blocked by the PDB, so the new resource values are never applied
+C. The PDB is automatically updated to allow the eviction
+D. The pod is deleted and not recreated, same as a standalone-pod scenario
+
+<details>
+<summary>Answer</summary>
+
+**B** — the Eviction API respects the PDB just like any other eviction request.
+Trap: A wrongly assumes VPA has special eviction privileges. C invents automatic PDB mutation that doesn't happen. D confuses this with the separate standalone-pod failure mode.
+
+</details>
+
+---
+
+**Q7. How does HPA change the number of running pods, mechanically?**
+
+A. It uses the Eviction API to remove pods gracefully, respecting PDBs
+B. It directly edits the Deployment's `replicas` field; the ReplicaSet controller creates/deletes pods to match, with no eviction involved
+C. It sends a resize signal to the container runtime
+D. It triggers the VPA Updater to evict and recreate pods with new counts
+
+<details>
+<summary>Answer</summary>
+
+**B** — HPA only ever changes the desired replica count.
+Trap: A describes VPA's Updater mechanism, not HPA's. C describes in-place resizing, unrelated to replica count. D conflates the two autoscalers' mechanisms entirely.
+
+</details>
+
+---
+
+**Q8. You need a workload's resources to update without any pod restart whenever possible, falling back to restart only if truly necessary. Which VPA mode fits this requirement?**
+
+A. Off
+B. Initial
+C. Recreate
+D. InPlaceOrRecreate
+
+<details>
+<summary>Answer</summary>
+
+**D** — attempts in-place resize first, falls back to evict-and-recreate only when necessary.
+Trap: C always restarts. B only applies once at pod creation and never updates a running pod. A never applies anything automatically.
+
+</details>
+
+---
+
+**Q9. `kubectl describe vpa` shows Lower Bound and Upper Bound values in addition to Target. What role do these play?**
+
+A. They define hard limits the pod's actual resources can never exceed
+B. They're historical min/max usage values with no effect on VPA's behavior
+C. They define the range the Recommender tolerates without changing Target — actual usage must move outside this range before Target updates
+D. They represent the previous and next scheduled recommendation update times
+
+<details>
+<summary>Answer</summary>
+
+**C** — Lower/Upper Bound gate when Target actually changes.
+Trap: A confuses these with resourcePolicy's min/maxAllowed, which are the real hard limits. B undersells their role in gating Target updates. D invents a time-based meaning that doesn't exist.
+
+</details>
+
+---
+
+Score guide:
+| Score | Action |
+|---|---|
+| 9/9 | Import Anki cards, move to next Demo |
+| 8/9 | Review the wrong answer, then proceed |
+| 7/9 | Re-read the relevant section, retry those questions |
+| Below 7/9 | Re-read the full demo and redo the walkthrough before proceeding |
+````
