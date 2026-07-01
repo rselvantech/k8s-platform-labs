@@ -36,7 +36,7 @@ kubectl top nodes
 ```
 
 **Knowledge Requirements:**
-- **REQUIRED:** Completion of `01-hpa-basic` — HPA v2 `Resource` metric type, the HPA scaling formula (`desiredReplicas = ceil[currentReplicas × (currentValue / targetValue)]`), scale-down stabilisation, `behavior` with `Pods`-type policies
+- **REQUIRED:** Completion of `01-hpa-basic` — HPA v2 `Resource` metric type, the HPA scaling formula (`desiredReplicas = ceil[currentReplicas × (currentValue / targetValue)]`), scale-down stabilisation, `behavior` with `Pods`-type and `selectPolicy` options
 - **REQUIRED:** Understanding of multi-container pods — containers in the same pod share network and IPC namespaces but have independent resource requests/limits
 
 ---
@@ -82,15 +82,14 @@ Answer from memory before continuing — these are scenario questions from `01-h
 
 1. A Deployment is running at 1 replica. An HPA's `kubectl describe` shows current CPU at 115% and target at 50%. Using the HPA scaling formula, how many replicas does the HPA scale to, and what is the calculation?
 2. After that scale-up, load drops to 0% CPU. By default, how long does the HPA wait before scaling back down, and what is it doing during that wait?
-3. You apply a VPA with `updatePolicy.updateMode: "Off"`. After a minute, `kubectl describe vpa` shows `RecommendationProvided: True` with a target of `cpu: 143m`. The pod is still running with its original `cpu: 100m` request. Why has the pod's resources not changed?
+3. You apply an HPA with `behavior.scaleDown.selectPolicy: Disabled`. Load drops to zero and stays there for 30 minutes. `kubectl get hpa` shows `cpu: 0%/50%` and REPLICAS stays at 5. `kubectl apply` produced no error when you created the HPA. What is wrong, and how do you fix it?
 
 <details>
 <summary>Answers</summary>
 
 1. `desiredReplicas = ceil[1 x (115/50)] = ceil[2.3] = 3`. The HPA scales the Deployment to 3 replicas.
 2. 5 minutes (300 seconds) — the default `scaleDown.stabilizationWindowSeconds`. During that window, the HPA records the highest replica-count recommendation seen over the last 5 minutes and will only scale down to that value, preventing it from removing pods and immediately needing to add them back.
-3. In `Off` mode, the Recommender runs and writes recommendations to `.status`, but the Updater never evicts pods and the Admission Controller never injects resources into running or new pods. `Off` mode is recommendations-only, for capacity planning — no pod is ever changed.
-
+3. `selectPolicy: Disabled` in the `scaleDown` block blocks all scale-down permanently, regardless of metric values or any `policies` entries listed alongside it. It is valid YAML and applies without error — nothing in the cluster signals a problem. Fix: change `selectPolicy: Disabled` to `selectPolicy: Max` (or `Min`) in the `scaleDown` block.
 </details>
 
 ---
@@ -210,8 +209,8 @@ At **small** replica counts, `Pods` with a large `value` reaches desired faster 
 > **Hands-on covered elsewhere:**
 > - HPA usage, YAML, scaling behaviour → `01-hpa-basic`
 > - VPA installation and usage → `03-vpa-fundamentals`
-> - Prometheus Adapter hands-on → `11-auto-scaling/05-prometheus-adapter` (minikube `3node`)
-> - AWS-specific sources (SQS, ALB, CloudWatch), CA, KEDA SQS → `aws-eks-demos`
+> - Prometheus Adapter hands-on → `05-prometheus-adapter`
+> - AWS-specific sources (SQS, ALB, CloudWatch), CA, KEDA SQS → not covered here. will be covered in `aws-eks-demos` series
 > - KEDA core (Kafka, Redis, Prometheus scalers) → `04-keda-adapter`
 
 ---
@@ -248,15 +247,23 @@ The key architectural point: **these are API contracts, not implementations**. K
 defines what the API looks like; separate components implement it.
 
 ```
-API Group                    Implemented By         Consumers
+API Group                      Implemented By       Consumers
 ──────────────────────────────────────────────────────────────────────────────
-metrics.k8s.io               metrics-server         HPA (Resource/ContainerResource)
+metrics.k8s.io                 metrics-server       HPA (Resource/ContainerResource)
                                                     VPA Recommender
                                                     kubectl top
 
-custom.metrics.k8s.io        metrics adapter        HPA (Pods, Object types)
+custom.metrics.k8s.io          metrics adapter      HPA only (Pods, Object types)
+                                                    VPA: never — VPA only reads
+                                                         metrics.k8s.io regardless
+                                                         of what adapters are installed
+                                                    CA:  never — CA reads no metrics
+                                                         API at all (watches scheduler
+                                                         state, not metric values)
 
-external.metrics.k8s.io      metrics adapter        HPA (External type)
+external.metrics.k8s.io        metrics adapter      HPA only (External type)
+                                                    VPA: never (same reason as above)
+                                                    CA:  never (same reason as above)
 ```
 
 #### 2.1 `metrics.k8s.io` — The Resource Metrics API
@@ -269,8 +276,10 @@ This is the only API that VPA uses. It is also what HPA uses for `type: Resource
 API directly.
 
 **Characteristics:**
-- Near real-time (scraped every ~15s, 1-minute rolling window)
-- In-memory only — no historical data, no persistence
+- Scrape interval: metrics-server polls each kubelet's `/metrics/resource` endpoint every **60 seconds** (default, configurable via `--metric-resolution` flag)
+- HPA evaluation interval: the HPA controller queries the Metrics API every **15 seconds** (default `--horizontal-pod-autoscaler-sync-period`)
+- These are two separate intervals: metrics-server refreshes its data every 60s; HPA reads whatever is current every 15s
+- In-memory only — no historical data, no persistence; only the most recent sample per pod is stored
 - No configuration required beyond installing metrics-server
 
 #### 2.2 `custom.metrics.k8s.io` — The Custom Metrics API
@@ -328,37 +337,11 @@ VPA only ever reads from `metrics.k8s.io`. CA does not use any metrics API at al
 
 ### 4. VPA — How It Gets Metrics (No Adapter Needed)
 
-VPA has three components, each with a distinct job:
+VPA Recommender reads only from `metrics.k8s.io` — the same API that `kubectl top` uses. No custom metrics adapter is involved. VPA does not scale replicas — it changes the `resources.requests` on the pod spec based on observed usage.
 
-```
-┌──────────────────────────────────────────────────────────────────────────┐
-│  VPA Recommender                                                         │
-│    ├─ Queries metrics.k8s.io (metrics-server) for current CPU/memory     │
-│    ├─ Optionally queries a Prometheus-compatible API for longer history  │
-│    │  (requires --history-provider-address flag at install — not default)│
-│    ├─ Computes recommended request/limit values per container            │
-│    └─ Writes recommendations to the VPA object status                    │
-│                                                                          │
-│  VPA Admission Controller (webhook)                                      │
-│    ├─ Intercepts new pod creation requests                               │
-│    ├─ Reads the VPA recommendation for that pod's owner                  │
-│    └─ Mutates the pod spec: sets resource requests to recommended values │
-│                                                                          │
-│  VPA Updater                                                             │
-│    ├─ Watches running pods whose requests differ from recommendation     │
-│    └─ Evicts those pods so they restart and get the new requests applied │
-│       via the Admission Controller                                       │
-└──────────────────────────────────────────────────────────────────────────┘
-```
+Full VPA component architecture (Recommender, Updater, Admission Controller), the histogram model, and update modes are covered in `03-vpa-fundamentals`.
 
-**Key points:**
-- VPA only reads `metrics.k8s.io` — the same API that `kubectl top` uses
-- No custom metrics adapter is involved
-- VPA does not scale replicas — it changes the resource requests on the pod spec
-- The Recommender uses historical data; the Admission Controller and Updater act on it
-- VPA and HPA should not both target CPU/memory on the same Deployment simultaneously
-  (they will fight). VPA + HPA is safe when HPA uses custom/external metrics and VPA
-  manages CPU/memory requests.
+**Key point for this reference:** VPA never queries `custom.metrics.k8s.io` or `external.metrics.k8s.io` regardless of what adapters are installed. This is why the table in Section 3 shows VPA only in the `metrics.k8s.io` column.
 
 ---
 
@@ -1276,7 +1259,66 @@ kubectl delete -f 03-hpa-behavior-percent.yaml
 
 ---
 
-### Step 4 — HPA Metric Type Decision Framework
+### Step 4 — `selectPolicy: Min`: Conservative Scaling
+
+This step demonstrates how `selectPolicy: Min` changes the scaling behaviour when two policies are defined. Instead of the most aggressive policy winning (Max), the least aggressive wins — useful when you want to cap burst scaling while still allowing gradual growth.
+
+Add a second policy to the existing behavior block:
+
+```yaml
+# Modify src/03-hpa-behavior-percent.yaml — replace the behavior block:
+behavior:
+  scaleUp:
+    stabilizationWindowSeconds: 0
+    selectPolicy: Min              # ← changed from Max to Min
+    policies:
+      - type: Percent
+        value: 100                 # doubles current count per 30s
+        periodSeconds: 30
+      - type: Pods
+        value: 1                   # adds at most 1 pod per 15s
+        periodSeconds: 15
+  scaleDown:
+    stabilizationWindowSeconds: 60
+    selectPolicy: Max
+    policies:
+      - type: Percent
+        value: 50
+        periodSeconds: 60
+```
+
+```bash
+kubectl apply -f 03-hpa-behavior-percent.yaml   # reapply with updated behavior
+
+kubectl exec deploy/multi-container-app -c app -- \
+  sh -c "while true; do dd if=/dev/urandom of=/dev/null bs=1M count=100; done"
+
+kubectl get hpa app-hpa-behavior-percent -w
+```
+
+**Expected output:**
+```
+NAME                      REPLICAS
+app-hpa-behavior-percent  1
+app-hpa-behavior-percent  2   ← +1 (Pods policy wins — Min picks LEAST change)
+app-hpa-behavior-percent  3   ← +1 (Pods: +1; Percent would be +100% of 2 = +2; Min picks +1)
+app-hpa-behavior-percent  4   ← +1 (same logic — Pods wins at every step)
+```
+
+```
+# Observation: with selectPolicy: Min, the Pods policy (value: 1) wins every cycle
+# because it proposes less change (+1) than Percent (which doubles each time).
+# Compare with Step 3 where selectPolicy: Max caused the doubling pattern (1→2→4→8).
+# selectPolicy: Min gives controlled, linear growth even with an aggressive Percent policy defined.
+```
+
+```bash
+kubectl delete -f 03-hpa-behavior-percent.yaml
+```
+
+---
+
+### Step 5 — HPA Metric Type Decision Framework
 
 
 | Metric type | API served by | Requires adapter? | Scope | Typical use case |

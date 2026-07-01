@@ -84,6 +84,27 @@ By the end of this lab, you will be able to:
 
 ---
 
+## Recall Check — 06-pod-scheduling/06-resource-management
+
+Answer from memory before continuing — these are scenario questions from `06-resource-management`.
+
+1. A container has `resources.requests.cpu: 200m` and `resources.limits.cpu: 500m`. The container's process is currently using 450m CPU. What happens, and why does Kubernetes allow this?
+2. A node has 2 CPU allocatable. Three pods are scheduled: Pod A requests 800m, Pod B requests 700m, Pod C requests 600m. A fourth pod requests 100m. Why does the fourth pod stay Pending even though the total usage on the node is only 1.2 CPU?
+3. You set `resources.requests.memory: 128Mi` and `resources.limits.memory: 128Mi` (requests equals limits). What QoS class does this pod get, and what does that mean for eviction priority?
+
+<details>
+<summary>Answers</summary>
+
+1. The container uses CPU freely up to its limit (500m). The kernel's cgroup CPU throttler allows bursting above the request (200m) as long as node capacity permits — Kubernetes does not "block" usage above the request. The request is only a scheduling guarantee: the scheduler ensures 200m is available on the node. Usage above the request is allowed up to the limit; beyond the limit, the CPU is throttled (usage is capped, not killed).
+
+2. Kubernetes uses requests for scheduling decisions, not actual usage. Total requests scheduled: 800m + 700m + 600m = 2,100m — which exceeds the node's 2,000m (2 CPU) allocatable. The scheduler rejects the fourth pod because adding 100m more requests (2,100m + 100m = 2,200m) would exceed the node's capacity in terms of reserved resources. Actual CPU usage being lower is irrelevant — the scheduler works with requests, not live usage.
+
+3. QoS class: **Guaranteed** — when requests equals limits for all resources (both CPU and memory) on all containers in the pod, the pod receives Guaranteed QoS. This means it is the last class to be evicted under node memory pressure. Eviction order is: BestEffort (evicted first) → Burstable (evicted second) → Guaranteed (evicted last).
+
+</details>
+
+---
+
 ## Understanding Autoscaling in Kubernetes
 
 ### What Is Scaling — Types and Overview
@@ -2091,6 +2112,380 @@ In this lab, you:
 
 ---
 
+## Break-Fix
+
+Four broken scenarios below. For each: apply the configuration, read the symptom from the cluster, diagnose, then reveal the answer.
+
+---
+
+### Error-1 — HPA TARGETS stays `<unknown>` permanently
+
+**`src/break-fix/01-hpa-missing-requests.yaml`:**
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nginx-no-requests
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: nginx-no-requests
+  template:
+    metadata:
+      labels:
+        app: nginx-no-requests
+    spec:
+      terminationGracePeriodSeconds: 0
+      containers:
+        - name: nginx
+          image: nginx:1.27
+          ports:
+            - containerPort: 80
+          # BUG: no resources block — no requests, no limits
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: hpa-no-requests
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: nginx-no-requests
+  minReplicas: 1
+  maxReplicas: 5
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 50
+```
+
+```bash
+kubectl apply -f src/break-fix/01-hpa-missing-requests.yaml
+# Wait 90 seconds, then:
+kubectl get hpa hpa-no-requests
+kubectl describe hpa hpa-no-requests | grep -A3 "Conditions:"
+kubectl top pods -l app=nginx-no-requests
+```
+
+`kubectl top pods` shows CPU usage. `kubectl get hpa` shows `<unknown>/50%` after 90 seconds. What is wrong?
+
+<details>
+<summary>Reveal answer — attempt diagnosis first</summary>
+
+```
+NAME              TARGETS           MINPODS   MAXPODS   REPLICAS
+hpa-no-requests   <unknown>/50%     1         5         1
+
+Conditions:
+  ScalingActive: False  FailedGetResourceMetric
+    "missing request for cpu"
+```
+
+**Cause:** `target.type: Utilization` requires `resources.requests.cpu` to be set on every container in the pod. Utilisation is computed as `usage / request × 100` — without a request, the denominator is missing and the metric cannot be calculated. The HPA controller reports `<unknown>` permanently (not transiently — this never resolves on its own).
+
+Note: `kubectl top pods` can still show CPU usage because cAdvisor reads directly from cgroups regardless of whether requests are set. The HPA controller is the one that needs requests — not cAdvisor.
+
+**Fix:** Add `resources.requests.cpu` (and optionally `resources.limits.cpu`) to the container spec. Minimum viable:
+```yaml
+resources:
+  requests:
+    cpu: "100m"
+```
+
+**Cascade:** HPA holds the current replica count (1) and never scales, regardless of actual load. No error is visible in pod events — the symptom is entirely in the HPA conditions.
+
+</details>
+
+---
+
+### Error-2 — HPA never scales down
+
+**`src/break-fix/02-hpa-scaledown-disabled.yaml`:**
+
+```yaml
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: hpa-no-scaledown
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: nginx-deploy
+  minReplicas: 1
+  maxReplicas: 10
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 50
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 0
+      policies:
+        - type: Pods
+          value: 4
+          periodSeconds: 15
+    scaleDown:
+      selectPolicy: Disabled    # BUG: all scale-down is blocked
+      policies:
+        - type: Pods
+          value: 2
+          periodSeconds: 60
+```
+
+```bash
+kubectl apply -f 01-nginx-deploy.yaml
+kubectl apply -f 02-load-generator.yaml
+kubectl apply -f src/break-fix/02-hpa-scaledown-disabled.yaml
+# Wait for scale-up (~2 min), then remove load:
+kubectl delete pod load-generator --grace-period=0 --force
+# Watch for 10+ minutes — replicas never decrease
+kubectl get hpa hpa-no-scaledown -w
+kubectl describe hpa hpa-no-scaledown | grep -A8 "Behavior:"
+```
+
+Load is removed. CPU drops to 0%. After 15 minutes, REPLICAS has not decreased. `kubectl apply` produced no error. What is wrong?
+
+<details>
+<summary>Reveal answer — attempt diagnosis first</summary>
+
+```
+Behavior:
+  Scale Down:
+    Select Policy: Disabled
+    Policies:
+      - Type: Pods  Value: 2  Period: 60 seconds
+```
+
+**Cause:** `scaleDown.selectPolicy: Disabled` blocks ALL scale-down regardless of any policies defined. The `policies` list entries are irrelevant when `selectPolicy: Disabled` is set — the select policy overrides them entirely. This is valid YAML and applies without error.
+
+**Fix:** Change `selectPolicy: Disabled` to `selectPolicy: Max` (or `Min`). The `Disabled` value is intentional — it is a legitimate way to freeze scale-down during an incident. In this case it was applied by mistake (or copy-pasted from an incident runbook without reverting).
+
+**Cascade:** Pods accumulate indefinitely after a load spike. If this behaviour goes unnoticed, the Deployment slowly wastes cluster resources until maxReplicas is reached and stays there. Cost impact can be significant in production.
+
+</details>
+
+---
+
+### Error-3 — AmbiguousSelector: two HPAs on same Deployment
+
+**`src/break-fix/03-hpa-ambiguous-selector.yaml`:**
+
+```yaml
+# This file creates a SECOND HPA targeting nginx-deploy.
+# The first HPA (nginx-hpa-cpu) already exists from Step 4.
+# Apply this while nginx-hpa-cpu is still running.
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: hpa-duplicate       # BUG: different name, same scaleTargetRef
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: nginx-deploy      # same Deployment as nginx-hpa-cpu
+  minReplicas: 2
+  maxReplicas: 8
+  metrics:
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: 70
+```
+
+```bash
+# Ensure nginx-hpa-cpu exists first:
+kubectl apply -f 01-nginx-deploy.yaml
+kubectl apply -f 03-hpa-cpu-v2.yaml
+# Now apply the conflicting second HPA:
+kubectl apply -f src/break-fix/03-hpa-ambiguous-selector.yaml
+
+# Wait ~30 seconds then check both HPAs:
+kubectl get hpa
+kubectl describe hpa nginx-hpa-cpu | grep -A3 "Events:"
+kubectl describe hpa hpa-duplicate | grep -A3 "Events:"
+```
+
+Both HPAs apply successfully. What happens to scaling, and why?
+
+<details>
+<summary>Reveal answer — attempt diagnosis first</summary>
+
+```
+Events:
+  Warning  FailedGetScale  Unauthorized: ... AmbiguousSelector ...
+  (same warning appears in BOTH HPA event logs)
+```
+
+**Cause:** Two HPA objects reference the same `scaleTargetRef` (the `nginx-deploy` Deployment). The HPA controller detects multiple HPAs competing for the same workload and reports `AmbiguousSelector` — it cannot determine which HPA is authoritative and refuses to act on either. Both HPAs stop scaling. The Deployment replica count freezes at whatever it was when the conflict was introduced.
+
+**Fix:** Delete one of the two HPAs. Only one HPA may target any given workload:
+```bash
+kubectl delete hpa hpa-duplicate
+```
+
+**Cascade:** The `nginx-deploy` Deployment is effectively unmanaged — no scaling in either direction — for the entire duration the conflict exists. Neither HPA's minReplicas/maxReplicas are enforced.
+
+</details>
+
+---
+
+### Error-4 — HPA formula miscalculation (Utilization vs AverageValue confusion)
+
+**`src/break-fix/04-hpa-wrong-target-type.yaml`:**
+
+```yaml
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: hpa-wrong-target
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: nginx-deploy
+  minReplicas: 1
+  maxReplicas: 5
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: AverageValue      # BUG: using AverageValue instead of Utilization
+          averageValue: "50"      # BUG: this means "50 nanocores", not "50%"
+                                  # For Utilization: 50 means 50% of request
+                                  # For AverageValue: 50 means 50 nanocores (0.05m)
+                                  # nginx at idle already uses ~2m CPU
+                                  # so HPA immediately sees usage >> target
+```
+
+```bash
+kubectl apply -f 01-nginx-deploy.yaml
+kubectl apply -f src/break-fix/04-hpa-wrong-target-type.yaml
+kubectl get hpa hpa-wrong-target -w
+```
+
+Without any load generator, the HPA immediately scales to maxReplicas. Why?
+
+<details>
+<summary>Reveal answer — attempt diagnosis first</summary>
+
+```
+NAME              TARGETS           MINPODS   MAXPODS   REPLICAS
+hpa-wrong-target  2m/50             1         5         1
+hpa-wrong-target  2m/50             1         5         5    ← scaled to max immediately
+```
+
+**Cause:** `target.type: AverageValue` with `averageValue: "50"` means "target 50 nanocores of average CPU per pod." Nanocores is the unit in which metrics-server reports CPU — `2m` (2 millicores) displayed by `kubectl top` is actually `2,000,000 nanocores`. Even nginx at idle uses far more than 50 nanocores, so the HPA immediately computes a desiredReplicas far above maxReplicas and caps at 5.
+
+The intended configuration was:
+```yaml
+target:
+  type: Utilization
+  averageUtilization: 50    # 50% of request — correct for CPU percentage target
+```
+
+**Fix:** Change `type: AverageValue` to `type: Utilization` and rename `averageValue` to `averageUtilization`. Alternatively, if `AverageValue` is intentional, the value should be a millicore quantity like `"50m"` (50 millicores) not `"50"` (50 nanocores).
+
+**Cascade:** HPA pegs at maxReplicas immediately on creation, wastes resources, and cannot scale down below maxReplicas until the configuration is corrected.
+
+</details>
+
+---
+
+## Interview Prep
+
+**Q1. You set up an HPA with `type: Resource` targeting CPU at 50%. Load is applied and `kubectl top pods` shows 180m CPU per pod against a 200m request (90% utilisation). But `kubectl get hpa` shows `<unknown>/50%` and REPLICAS stays at 1. What do you check first, and why might this happen?**
+
+The `<unknown>` in TARGETS means the HPA controller cannot compute the metric, not that it cannot act. First check: `kubectl describe hpa <name> | grep -A5 Conditions` — look at `ScalingActive`. If `FailedGetResourceMetric`, the likely cause is that `resources.requests.cpu` is not set on one or more containers in the pod. HPA uses `type: Utilization` which computes `usage / request × 100` — without a request, the formula has no denominator and the metric is undefined. `kubectl top pods` can still show usage because cAdvisor reads from cgroups directly; the issue is HPA-side. Second check: wait 60–90 seconds — the first `<unknown>` after pod creation is transient (metrics-server hasn't scraped yet). Transient resolves; missing request does not.
+
+**Q2. Explain the HPA scale-down stabilisation window. Why does it exist, and what is the consequence of setting it to 0?**
+
+The default `scaleDown.stabilizationWindowSeconds: 300` (5 minutes) means HPA records every recommended replica count over the last 5 minutes and only scales down to the HIGHEST recommendation seen in that window. This prevents thrashing: traffic bursts are rarely isolated — if load drops briefly and HPA immediately removes pods, the next traffic spike requires scaling back out (which takes time and causes a gap in capacity). With `stabilizationWindowSeconds: 0`, HPA scales down immediately when the metric drops below target. This is appropriate when workloads genuinely have sharp, isolated traffic peaks with no concern about churn — but in most web workloads it causes scale-in/scale-out oscillation that is worse than the idle pod cost.
+
+**Q3. You have `behavior.scaleUp.policies` with two entries: `{type: Pods, value: 4, periodSeconds: 15}` and `{type: Percent, value: 100, periodSeconds: 30}`, with `selectPolicy: Max`. At 1 replica with sustained high demand, how many replicas does HPA target after 30 seconds, and which policy won?**
+
+After 30 seconds: `Pods` policy allows 4+4=8 pods (two 15-second windows in 30 seconds). `Percent` policy allows +100% of 1 = 2 pods in 30 seconds. `selectPolicy: Max` picks the result with the most change — `Pods` wins (8 > 2). HPA targets min(8, maxReplicas). Note: the `Pods` policy wins at small replica counts because the absolute step (4 per window) exceeds the relative step (100% of 1 = 1). The crossover point where `Percent` overtakes `Pods` is at 4+ replicas: at 5 replicas, Pods gives +8 (5+4+4) while Percent gives +10 (5+100%=10, then 10+100% capped at two windows but starting from 5, not 10 — actually 5→10 in first 30s, Percent wins). The selectPolicy governs which policy drives the outcome each cycle.
+
+**Q4. What is the difference between `ScalingActive: False` and `AbleToScale: False` in `kubectl describe hpa` output? Which is more serious?**
+
+`ScalingActive: False` is more serious. It means HPA cannot compute a desired replica count at all — the metric pipeline is broken (no metrics-server, missing resource requests, or invalid selector). HPA is completely non-functional; no scaling occurs in any direction. `AbleToScale: False` means HPA CAN compute a desired replica count but is temporarily prevented from acting on it — usually because it recently scaled and is in a stabilisation window (BackoffDownscale, BackoffUpscale, BackoffBoth). This is often expected behaviour, not an error. The sequence to read conditions: check `ScalingActive` first (is the metric pipeline working?); only if True, check `AbleToScale` (is HPA allowed to act right now?); only if True, check `ScalingLimited` (is the desired count hitting min/max bounds?).
+
+**Q5. Why does HPA use direct pod DELETE for scale-down instead of the Eviction API, and what practical problem does this create?**
+
+HPA was designed before the Eviction API matured. Its scale-down path uses direct deletion for simplicity and speed — this is a known design limitation discussed in Kubernetes SIG Autoscaling but not changed to avoid breaking existing behaviour. The practical problem: HPA scale-down bypasses PodDisruptionBudgets. If a Deployment has `minAvailable: 3` and HPA decides to scale from 5 to 1, it will DELETE 4 pods simultaneously via the scale subresource, dropping below the PDB's minimum of 3. The PDB is never consulted. By contrast, `kubectl drain` and VPA Updater both use the Eviction API and DO respect PDB. The workaround: set HPA `minReplicas` to match or exceed the PDB's `minAvailable` — this prevents HPA from ever trying to scale below the PDB floor.
+
+---
+
+## Cert Tips
+
+### Exam Objective Mapping
+
+| Demo concept / command | Exam objective | Notes |
+|---|---|---|
+| HPA API version `autoscaling/v2` | CKA-domain2 — Workloads & Scheduling | Always use v2; v1 is stored as v2 internally anyway |
+| HPA scaling formula `ceil[currentReplicas × (current/target)]` | CKA-domain2 — Workloads & Scheduling | Must be able to apply manually in exam questions |
+| `kubectl autoscale deployment <name> --cpu=50% --min=1 --max=5` | CKA-domain2 — Workloads & Scheduling | Use `--cpu=50%` not `--cpu-percent` (deprecated) |
+| `<unknown>` in TARGETS — missing `resources.requests` | CKA-domain5 — Troubleshooting | Most common HPA troubleshooting question in CKA |
+| `AbleToScale: False` vs `ScalingActive: False` | CKA-domain5 — Troubleshooting | ScalingActive False = pipeline broken; AbleToScale False = in cooldown (often normal) |
+| `behavior.scaleDown.stabilizationWindowSeconds: 300` | CKA-domain2 — Workloads & Scheduling | Default is 300s (5 min); 0 = immediate scale-down |
+| `selectPolicy: Disabled` | CKA-domain5 — Troubleshooting | Blocks all scaling in that direction — valid YAML, no error at apply time |
+| `type: Utilization` vs `type: AverageValue` for CPU | CKA-domain2 — Workloads & Scheduling | Utilization = %; AverageValue = raw quantity (nanocores, bytes) |
+| One HPA per workload — AmbiguousSelector | CKA-domain5 — Troubleshooting | Two HPAs on same Deployment → both stop working |
+
+### Common Exam Traps
+
+| Question pattern | Correct answer | Why wrong answers fail |
+|---|---|---|
+| "kubectl top shows CPU usage but HPA shows `<unknown>`" | Missing `resources.requests.cpu` on at least one container — HPA needs the request to compute utilisation% | "Wait longer" is wrong for permanent `<unknown>`; `kubectl top` working is a red herring — cAdvisor and HPA have different requirements |
+| "`kubectl autoscale --cpu-percent=50`" | Wrong — `--cpu-percent` is deprecated; use `--cpu=50%` | The deprecated flag may still work on some clusters but is not the exam-expected form |
+| "Two HPAs targeting the same Deployment — which one wins?" | Neither — both stop working (AmbiguousSelector); delete the extra one | There is no precedence; the conflict breaks both HPAs |
+| "HPA will respect PDB during scale-down" | False — HPA uses direct DELETE, bypassing the Eviction API and PDB | This is a known HPA design limitation; VPA Updater and `kubectl drain` DO respect PDB |
+| "`ScalingActive: False` means HPA is in cooldown" | False — `ScalingActive: False` means the metric pipeline is broken (cannot compute). Cooldown is `AbleToScale: False` | These two conditions are distinct; ScalingActive False is the more serious one |
+| "`type: AverageValue, averageValue: 50` means target 50% CPU" | False — AverageValue with no unit suffix means 50 nanocores (not 50%). For 50% use `type: Utilization, averageUtilization: 50`. For 50 millicores use `type: AverageValue, averageValue: "50m"` | The unit difference between Utilization and AverageValue is a classic exam trap |
+| "`behavior.scaleDown.selectPolicy: Disabled` still uses the policies list" | False — `Disabled` overrides all policies; the policies list entries are ignored | Valid YAML, no error, but completely blocks scale-down |
+
+---
+
+## Key Takeaways
+
+| Concept | Detail |
+|---|---|
+| cAdvisor role | Embedded in kubelet; reads container CPU/memory from cgroup filesystem; no storage — live snapshot only; exposes per-container data at `/metrics/resource` |
+| metrics-server role | Cluster addon; scrapes every kubelet every 60s; aggregates per-container data into PodMetrics and NodeMetrics; exposes via `metrics.k8s.io`; retains only the most recent sample |
+| cAdvisor → metrics-server aggregation | cAdvisor provides per-container values; metrics-server aggregates to pod level (sum of containers) and node level |
+| HPA metrics pipeline | cAdvisor → kubelet `/metrics/resource` → metrics-server → `metrics.k8s.io` → HPA controller (every 15s) → scale subresource |
+| Scale subresource | `/scale` sub-path on a workload's API endpoint; HPA writes ONLY to this, never to the full Deployment spec |
+| HPA scaling formula | `desiredReplicas = ceil[currentReplicas × (currentMetricValue / desiredMetricValue)]` |
+| 10% tolerance | HPA does not scale if metric is within ±10% of target — prevents flapping |
+| MAX rule | Multiple metrics: HPA evaluates each independently and takes the maximum desired replica count |
+| `<unknown>` — transient | First 30-60s after pod creation: metrics-server hasn't scraped yet. Wait and it resolves |
+| `<unknown>` — permanent | Missing `resources.requests` on one or more containers: HPA cannot compute utilisation% |
+| Scale-down stabilisation | Default 300s window; HPA records highest recommendation seen over that window; only scales to that high; prevents premature scale-down |
+| `selectPolicy: Max` | Most aggressive policy wins each evaluation cycle (default) |
+| `selectPolicy: Min` | Most conservative policy wins — controlled, cautious scaling |
+| `selectPolicy: Disabled` | Blocks ALL scaling in that direction; policies list is ignored; valid YAML with no apply-time error |
+| `type: Pods` and `type: Percent` can mix | `policies` is a list; both types valid simultaneously; `selectPolicy` arbitrates each cycle |
+| HPA does not use Eviction API | Scale-down uses direct DELETE via scale subresource; PDB is NOT respected; this is a known design limitation |
+| PDB + HPA safeguard | Set `minReplicas` ≥ PDB `minAvailable` — prevents HPA from trying to scale below the PDB floor |
+| `Utilization` vs `AverageValue` for CPU | `Utilization: 50` = 50% of cpu request; `AverageValue: "50m"` = 50 millicores raw; `AverageValue: "50"` = 50 nanocores (almost certainly wrong for CPU) |
+| Namespace rule | HPA and scaleTargetRef must be in the same namespace; cross-namespace targeting silently fails |
+| `kubectl autoscale` modern flag | `--cpu=50%` not `--cpu-percent` (deprecated); internally creates `autoscaling/v2` |
+| One HPA per workload | Two HPAs on the same Deployment → AmbiguousSelector → both HPAs stop working |
+
+---
+
 ## Quick Commands Reference
 
 | Command | Description |
@@ -2191,3 +2586,410 @@ kubectl describe hpa <name> -n <namespace>
 # If False or absent: metrics-server pod may be crash-looping
 kubectl describe pod -n kube-system -l k8s-app=metrics-server
 ```
+## Appendix — Anki Cards
+
+**`01-hpa-basic-anki.csv`:**
+
+```
+#deck:k8s-platform-labs::11-auto-scaling::01-hpa-basic
+#separator:Comma
+#columns:Front,Back,Tags
+"What is cAdvisor and where does it run?","cAdvisor (container Advisor) is an open-source agent embedded directly inside every kubelet process — not a separate Deployment. It reads container CPU and memory usage from the Linux cgroup filesystem, aggregates per container, and exposes the data at the kubelet's /metrics/resource endpoint. It stores nothing — it is a live snapshot reader only.","01-hpa-basic,cadvisor,architecture"
+"Why does cAdvisor read from cgroups instead of /proc?","/proc gives a process-level view tied to a specific PID and cannot aggregate all processes in a container. cgroups groups all processes in a container into a hierarchy — reading the cgroup gives the TOTAL usage of ALL processes inside the container. A forking application with PIDs 1, 10, 11, 12 would show only PID 1 via /proc but ALL four combined via cgroup.","01-hpa-basic,cadvisor,cgroups"
+"How long does cAdvisor retain metrics?","Zero retention. cAdvisor is a live reader — every time metrics-server calls the kubelet endpoint, cAdvisor reads current cgroup values and returns them. No historical buffer, no rolling window. For historical data, use Prometheus.","01-hpa-basic,cadvisor,retention"
+"What is metrics-server and what does it aggregate?","metrics-server is a cluster addon (Deployment in kube-system) that scrapes cAdvisor data from every node's /metrics/resource endpoint every 60 seconds. It aggregates: per-container data → PodMetrics (pod-level + container breakdown); pod data → NodeMetrics (node-level). Exposes via metrics.k8s.io API. Retains only the most recent sample per pod — not a time-series database.","01-hpa-basic,metrics-server,architecture"
+"What is working set memory, and why does kubectl top use it instead of RSS?","Working set = RSS minus recently-used-but-releasable file cache = memory the container genuinely needs right now. RSS overstates committed memory because it includes idle file cache that the kernel would release under memory pressure. Working set is more meaningful for HPA decisions (avoids false scale-out from idle cache) and matches OOMKill triggering (OOMKill is based on working set, not RSS).","01-hpa-basic,metrics-server,working-set"
+"What are NodeMetrics and PodMetrics?","Two resource kinds exposed by metrics-server via the metrics.k8s.io API. NodeMetrics (cluster-scoped): CPU and memory per node — queried by kubectl top nodes. PodMetrics (namespace-scoped): CPU and memory per pod with per-container breakdown — queried by kubectl top pods. Not stored CRDs — each request returns a fresh live read from metrics-server's in-memory store.","01-hpa-basic,metrics-server,api-resources"
+"What is the HPA scaling formula?","desiredReplicas = ceil[currentReplicas × (currentMetricValue / desiredMetricValue)]. Example: 1 replica, CPU at 115%, target 50%: ceil[1 × (115/50)] = ceil[2.3] = 3. The formula applies the same way for CPU%, memory%, and custom metrics using AverageValue.","01-hpa-basic,hpa,formula"
+"What is the HPA 10% tolerance and why does it exist?","HPA does not scale if the metric ratio (current/target) is within 10% of 1.0 — i.e. between 0.9 and 1.1. This prevents flapping: a metric that oscillates around the target would otherwise trigger constant scale-up and scale-down events. Example: target 50%, current 54% — ratio = 1.08, within tolerance, no scaling. Current 56%: ratio = 1.12, outside tolerance, scale-up triggered.","01-hpa-basic,hpa,tolerance"
+"What does HPA do when multiple metrics are configured?","HPA evaluates each metric independently and takes the MAXIMUM desired replica count across all of them. Example: CPU suggests 3 replicas, memory suggests 1 replica — HPA targets 3. Safety rule: if ANY metric is unavailable AND suggests scale-down, scaling is skipped entirely (safe default). If ANY metric is unavailable AND suggests scale-up, scale-up proceeds using available metrics only.","01-hpa-basic,hpa,multiple-metrics"
+"What is the scale subresource and why does HPA use it?","The scale subresource is a /scale sub-path on a workload's API endpoint (e.g. /apis/apps/v1/namespaces/default/deployments/nginx-deploy/scale) that contains only the replica count and selector — not the full spec. HPA updates ONLY the scale subresource, never the full Deployment spec. This keeps changes lightweight and is why `kubectl get deployment -o yaml` shows updated replicas even though HPA never modified the YAML.","01-hpa-basic,hpa,scale-subresource"
+"Why does HPA not use the Eviction API for scale-down?","HPA was designed before the Eviction API matured. Its scale-down path uses direct DELETE on pods via the scale subresource — simpler and faster but bypasses PodDisruptionBudgets. This is a known design limitation discussed in Kubernetes SIG Autoscaling but not changed to avoid breaking existing behaviour. VPA Updater and kubectl drain DO use the Eviction API and respect PDB.","01-hpa-basic,hpa,eviction-api,pdb"
+"kubectl top shows CPU usage but HPA TARGETS shows <unknown>. What is the most likely cause?","Missing resources.requests.cpu on at least one container in the pod. HPA type: Utilization computes usage/request × 100 — without a request, the denominator is missing and the metric cannot be computed. kubectl top works because cAdvisor reads from cgroups regardless of whether requests are set. The <unknown> is permanent until requests are added.","01-hpa-basic,break-fix,unknown-metric"
+"What does ScalingActive: False mean in kubectl describe hpa, and how is it different from AbleToScale: False?","ScalingActive: False means the metric pipeline is broken — HPA cannot compute a desired replica count at all. The most common causes: metrics-server not running, missing resources.requests, or invalid pod selector. Fix the metric source first. AbleToScale: False means HPA CAN compute but is temporarily blocked — usually in a stabilisation/cooldown window after a recent scale event. This is often normal expected behaviour, not an error.","01-hpa-basic,hpa,conditions,troubleshooting"
+"What is the default scaleDown stabilisation window and what does it prevent?","Default: 300 seconds (5 minutes). During this window, HPA records every recommended replica count and only scales down to the HIGHEST recommendation seen. This prevents thrashing: if load drops briefly, HPA waits to confirm the drop is sustained before removing pods, avoiding a scale-in/scale-out cycle within minutes.","01-hpa-basic,hpa,stabilisation-window"
+"What does selectPolicy: Disabled do in a behavior block?","Blocks ALL scaling in that direction entirely — scale-up or scale-down is frozen. Any policies listed alongside it are ignored. Valid YAML, applies without error. Use during incidents to freeze a direction while investigating. Setting scaleDown.selectPolicy: Disabled means the Deployment will never scale in, regardless of how low the metric drops.","01-hpa-basic,hpa,selectpolicy"
+"Describe the selectPolicy: Max worked example: 1 replica, policies: [{Pods, 4, 15s}, {Percent, 100, 30s}]. After 30 seconds, how many replicas?","Pods policy: 1→5 (+4, then +4 again but desire already 5 by second 15s window). Percent policy: 1→2 (+100% of 1). selectPolicy: Max picks Pods (proposes more change: +4 vs +1). Result: 5 replicas. At large replica counts the crossover reverses — Percent proposes more than the fixed Pods step.","01-hpa-basic,hpa,selectpolicy,behavior"
+"What is the difference between type: Utilization and type: AverageValue for CPU?","Utilization: expressed as an integer percentage of the request (averageUtilization: 50 means 50% of resources.requests.cpu). Requires resources.requests to be set. AverageValue: raw quantity (averageValue: 50m means 50 millicores; averageValue: 50 means 50 nanocores — almost never intended). Common mistake: averageValue: 50 for CPU looks like 50% but means 50 nanocores, causing immediate runaway scale-out.","01-hpa-basic,hpa,target-type"
+"Two HPAs target the same Deployment. What happens?","AmbiguousSelector conflict — the HPA controller cannot determine which HPA is authoritative and stops processing BOTH. Both HPAs report FailedGetScale: Unauthorized with AmbiguousSelector in events. The Deployment replica count freezes. Fix: delete the extra HPA. Rule: one HPA per workload.","01-hpa-basic,break-fix,ambiguous-selector"
+"(CKA) kubectl autoscale deployment nginx --min=1 --max=5 --cpu=50%. Which API version does this create internally?","autoscaling/v2 — kubectl autoscale creates v2 internally regardless of flag format. Verify with: kubectl get hpa nginx -o yaml | grep apiVersion. The --cpu=50% flag is the current form; --cpu-percent is deprecated.","01-hpa-basic,cka-domain2,imperative"
+"(CKA) An HPA has behavior.scaleDown.selectPolicy: Disabled. The metric drops to 0%. After 10 minutes, REPLICAS is still at 5. kubectl apply produced no error. What is wrong?","selectPolicy: Disabled in the scaleDown block blocks all scale-down permanently regardless of metric values or policies listed. Valid YAML, no error at apply time. Fix: change selectPolicy to Max or Min.","01-hpa-basic,cka-domain5,break-fix,selectpolicy"
+```
+
+---
+
+## Appendix — Quiz
+
+````markdown
+# Quiz — 11-auto-scaling/01-hpa-basic: HPA and the Kubernetes Horizontal Scaling Model
+
+> One correct answer per question unless stated otherwise.
+> Target: 17/20 or above before moving to 02-hpa-advanced.
+
+**Q1. What does cAdvisor read to collect container CPU and memory usage?**
+
+A. `/proc/<pid>/stat` for each process in the container
+B. The Linux cgroup filesystem (`/sys/fs/cgroup/`)
+C. The `metrics.k8s.io` API endpoint
+D. The kubelet's internal in-memory cache
+
+<details>
+<summary>Answer</summary>
+
+**B** — cAdvisor reads the Linux cgroup filesystem. Each container runtime creates a cgroup hierarchy per container; cAdvisor reads the hierarchy totals to get ALL processes in the container, not just PID 1.
+
+Trap A: `/proc/<pid>/stat` gives per-process view, cannot aggregate across all processes in a container. Trap C: cAdvisor feeds metrics-server, not the other way around. Trap D: no such cache.
+
+</details>
+
+---
+
+**Q2. metrics-server scrapes kubelet every 60 seconds. What does it retain after each scrape?**
+
+A. The last 5 minutes of samples (rolling window)
+B. The last 15 seconds of samples
+C. Only the most recent sample per pod/container
+D. All samples since metrics-server started, up to 1GB
+
+<details>
+<summary>Answer</summary>
+
+**C** — metrics-server retains only the most recent sample. It is not a time-series database. Restarting metrics-server clears all data.
+
+Trap A and B: no rolling window. Trap D: no accumulation.
+
+</details>
+
+---
+
+**Q3. `kubectl top pods` shows a container using 180m CPU. `kubectl get hpa` shows `<unknown>/50%` after 90 seconds. What is the most likely cause?**
+
+A. metrics-server is not running
+B. The HPA controller sync period has not elapsed yet
+C. `resources.requests.cpu` is not set on the container
+D. The Deployment has 0 replicas
+
+<details>
+<summary>Answer</summary>
+
+**C** — `<unknown>` after 90 seconds is permanent — transient `<unknown>` resolves within 60s. `kubectl top` working confirms metrics-server is running and cAdvisor is producing data. Missing `resources.requests.cpu` means the HPA formula denominator is undefined.
+
+Trap A: kubectl top working proves metrics-server is up. Trap B: 90 seconds is well past the 60s scrape cycle. Trap D: 0 replicas would show 0 pods in kubectl get pods, and REPLICAS: 0 in kubectl get hpa.
+
+</details>
+
+---
+
+**Q4. A Deployment has 2 replicas. HPA target is CPU 50%. Current average CPU is 140%. What does HPA scale to?**
+
+A. 4 — ceil[2 × (140/50)] = ceil[5.6] = 6... wait that's 6
+B. 3 — ceil[2 × (140/100)] = ceil[2.8] = 3
+C. 6 — ceil[2 × (140/50)] = ceil[5.6] = 6
+D. 5 — ceil[2 × (140/50)] = 5.6, rounded down
+
+<details>
+<summary>Answer</summary>
+
+**C** — `ceil[2 × (140/50)] = ceil[5.6] = 6`. The formula always uses `ceil()` (ceiling, rounds up).
+
+Trap B: uses 100 as the denominator — the target is 50%, not 100%. Trap D: the formula uses ceiling, not floor or round.
+
+</details>
+
+---
+
+**Q5. HPA tolerance is 10%. Target is 50%. Current CPU is 53%. Does HPA scale up?**
+
+A. Yes — 53% > 50%, HPA scales up
+B. No — 53/50 = 1.06, within the 10% tolerance band, no scaling
+C. No — HPA only scales up if CPU exceeds 100%
+D. Yes — tolerance only applies to scale-down
+
+<details>
+<summary>Answer</summary>
+
+**B** — ratio = 53/50 = 1.06. The tolerance band is ±10% around 1.0, so ratios between 0.9 and 1.1 do not trigger scaling. 1.06 is within that band.
+
+Trap A: crossing the target does not automatically trigger scaling — must be outside the tolerance. Trap C: no such rule. Trap D: tolerance applies to both scale-up and scale-down.
+
+</details>
+
+---
+
+**Q6. HPA has two metrics: CPU at 115% (target 50%) and memory at 8% (target 70%). How many replicas does HPA target from a starting point of 1?**
+
+A. 1 — memory is below target, so no scaling
+B. 3 — CPU says ceil[1×(115/50)]=3, memory says ceil[1×(8/70)]=1, MAX=3
+C. 2 — average of 3 and 1
+D. 4 — CPU + memory combined
+
+<details>
+<summary>Answer</summary>
+
+**B** — HPA evaluates each metric independently and takes the MAX. CPU: ceil[1×(115/50)] = ceil[2.3] = 3. Memory: ceil[1×(8/70)] = ceil[0.11] = 1. MAX(3,1) = 3.
+
+Trap A: the MAX rule means one metric exceeding target is sufficient. Trap C: metrics are not averaged. Trap D: metrics are not summed.
+
+</details>
+
+---
+
+**Q7. What is the scale subresource, and what does HPA write to it?**
+
+A. A separate object in etcd that stores the Deployment's YAML
+B. A sub-path on the Deployment's API endpoint that contains only the replica count; HPA writes the desired replica count here
+C. A Kubernetes Event that records the scaling decision
+D. The `/metrics/resource` endpoint on the kubelet
+
+<details>
+<summary>Answer</summary>
+
+**B** — the scale subresource is at `.../deployments/<name>/scale` and contains only replica count and selector. HPA writes the desired replica count to it; the Deployment controller then reconciles. HPA never modifies the full Deployment spec.
+
+Trap A: no separate etcd object for scale. Trap C: Events are read-only audit records. Trap D: that is a kubelet endpoint, not part of the HPA pipeline.
+
+</details>
+
+---
+
+**Q8. Why does HPA NOT use the Eviction API for scale-down?**
+
+A. The Eviction API does not exist in autoscaling/v2
+B. HPA was designed before the Eviction API matured; it uses direct DELETE for speed
+C. The Eviction API only works for nodes, not pods
+D. Using the Eviction API would prevent HPA from scaling below minReplicas
+
+<details>
+<summary>Answer</summary>
+
+**B** — this is a known design decision/limitation: HPA predates the Eviction API and uses direct pod DELETE via the scale subresource. This means PDB is not respected during HPA scale-down.
+
+Trap A: the Eviction API exists and works for pods. Trap C: the Eviction API applies to pods. Trap D: minReplicas is enforced separately, unrelated to which deletion mechanism is used.
+
+</details>
+
+---
+
+**Q9. `kubectl describe hpa` shows `ScalingActive: False, FailedGetScale`. What is the correct first action?**
+
+A. Check if the HPA is in the default scale-down stabilisation window
+B. Check if the metric pipeline is working — metrics-server running and resources.requests set
+C. Raise maxReplicas — the HPA has hit its ceiling
+D. Delete and recreate the HPA
+
+<details>
+<summary>Answer</summary>
+
+**B** — `ScalingActive: False` means the HPA cannot compute replicas at all. Fix the metric source first. `AbleToScale: False` (not ScalingActive) indicates cooldown. `ScalingLimited: True, TooManyReplicas` indicates hitting maxReplicas.
+
+Trap A: that describes AbleToScale False, BackoffDownscale. Trap C: ScalingLimited True TooManyReplicas would show that. Trap D: recreating the HPA does not fix the metric problem.
+
+</details>
+
+---
+
+**Q10. What does the default `scaleDown.stabilizationWindowSeconds: 300` prevent?**
+
+A. HPA from scaling up too fast after a brief quiet period
+B. HPA from removing pods immediately after a short load drop, preventing thrashing
+C. HPA from scaling to maxReplicas in a single step
+D. The Deployment from going below minReplicas
+
+<details>
+<summary>Answer</summary>
+
+**B** — the stabilisation window records all scale-down recommendations over 5 minutes and only scales to the highest (least aggressive) recommendation seen. If load spikes again within the window, the scale-down is deferred. This prevents removing pods only to immediately add them back.
+
+Trap A: the stabilisation window is for scale-DOWN, not scale-UP. Scale-up default window is 0 (immediate). Trap C: that is the job of behavior policies (Pods, Percent). Trap D: minReplicas is a hard floor independent of the stabilisation window.
+
+</details>
+
+---
+
+**Q11. Two HPAs target the same Deployment. What happens?**
+
+A. The HPA with lower minReplicas takes precedence
+B. The HPA created first takes precedence
+C. Both HPAs stop working — AmbiguousSelector conflict
+D. The Deployment scales to the average of both HPAs' desired replica counts
+
+<details>
+<summary>Answer</summary>
+
+**C** — the HPA controller cannot determine which HPA is authoritative and refuses to act on either. Both report FailedGetScale with AmbiguousSelector. The Deployment replica count freezes.
+
+Traps A, B, D: no precedence or averaging — the conflict breaks both HPAs.
+
+</details>
+
+---
+
+**Q12. `behavior.scaleDown.selectPolicy: Disabled` is set. After load drops to zero, what happens over the next 30 minutes?**
+
+A. HPA scales down normally but slowly
+B. HPA scales down after the stabilisationWindowSeconds elapses
+C. HPA never scales down — Disabled blocks all scale-down regardless of metric
+D. HPA scales down to minReplicas only
+
+<details>
+<summary>Answer</summary>
+
+**C** — `Disabled` overrides all policies; the policies list is completely ignored. This is intentional behaviour for incident management, but is a common misconfiguration when copy-pasted.
+
+Trap A, B, D: Disabled has no exceptions — it blocks all scale-down in that block.
+
+</details>
+
+---
+
+**Q13. `kubectl autoscale deployment nginx --min=1 --max=5 --cpu=50%` creates which API version internally?**
+
+A. autoscaling/v1
+B. autoscaling/v2beta1
+C. autoscaling/v2
+D. autoscaling/v3
+
+<details>
+<summary>Answer</summary>
+
+**C** — `kubectl autoscale` creates `autoscaling/v2` internally, even with the v1-style `--cpu=50%` flag. Verify with `kubectl get hpa nginx -o yaml | grep apiVersion`.
+
+Trap A: v1 is stored as v2 internally. Trap B: v2beta1 is deprecated. Trap D: does not exist.
+
+</details>
+
+---
+
+**Q14. What is the correct `kubectl autoscale` flag for CPU (not deprecated)?**
+
+A. `--cpu-percent=50`
+B. `--cpu=50%`
+C. `--target-cpu=50`
+D. `--averageUtilization=50`
+
+<details>
+<summary>Answer</summary>
+
+**B** — `--cpu=50%` is the current form. `--cpu-percent` is deprecated.
+
+Traps A, C, D: not the current standard form.
+
+</details>
+
+---
+
+**Q15. A pod has `resources.requests.cpu: 200m`. `kubectl top` shows 180m CPU usage. What utilisation% does HPA calculate?**
+
+A. 180% — usage/limit × 100
+B. 90% — 180/200 × 100
+C. 36% — 180/500 × 100 (using the limit)
+D. Cannot calculate — usage exceeds limit
+
+<details>
+<summary>Answer</summary>
+
+**B** — HPA `type: Utilization` computes `usage / request × 100` = 180/200 × 100 = 90%. It uses the request, not the limit.
+
+Trap A: would require dividing by limit (100m) — wrong denominator. Trap C: uses limits not requests. Trap D: 180m is below the 200m request, well within limits.
+
+</details>
+
+---
+
+**Q16. `kubectl describe hpa` shows `AbleToScale: False, BackoffDownscale`. What does this mean?**
+
+A. The metric pipeline is broken — check metrics-server
+B. HPA recently scaled down and is in the scale-down stabilisation window — normal expected behaviour
+C. HPA is blocked because the Deployment is at minReplicas
+D. A PodDisruptionBudget is preventing scale-down
+
+<details>
+<summary>Answer</summary>
+
+**B** — BackoffDownscale means HPA computed a scale-down recommendation but is in the stabilisation window (still recording recommendations to take the highest). This is normal expected behaviour after a load drop — not an error.
+
+Trap A: that is `ScalingActive: False`. Trap C: that is `ScalingLimited: True, TooFewReplicas`. Trap D: HPA does not consult PDB.
+
+</details>
+
+---
+
+**Q17. Which HPA metric types require a metrics adapter beyond metrics-server?**
+
+A. Resource and ContainerResource
+B. Pods, Object, and External
+C. All five metric types
+D. Only External
+
+<details>
+<summary>Answer</summary>
+
+**B** — Pods (custom.metrics.k8s.io), Object (custom.metrics.k8s.io), and External (external.metrics.k8s.io) all require a metrics adapter. Resource and ContainerResource are served by metrics-server alone.
+
+Trap A: those two work with metrics-server. Trap C: not all five. Trap D: External is one, but Pods and Object also need an adapter.
+
+</details>
+
+---
+
+**Q18. What is the difference between HPA `type: Utilization` and `type: AverageValue` for CPU?**
+
+A. Utilization is for CPU only; AverageValue is for memory only
+B. Utilization expresses the target as a percentage of resources.requests; AverageValue expresses it as a raw quantity (millicores, bytes)
+C. AverageValue averages across all nodes; Utilization averages across all pods
+D. They are interchangeable — same formula, different field names
+
+<details>
+<summary>Answer</summary>
+
+**B** — Utilization: `averageUtilization: 50` means 50% of the cpu request. Requires requests to be set. AverageValue: `averageValue: "50m"` means 50 millicores raw; `averageValue: "50"` means 50 nanocores (almost certainly wrong for CPU targets).
+
+Trap A: both work for CPU and memory. Trap C: both average across pods of the target. Trap D: different formulas — Utilization divides usage by request; AverageValue compares usage directly.
+
+</details>
+
+---
+
+**Q19. (CKA-style) You run `kubectl get hpa nginx-hpa -w` and observe REPLICAS going 1→3→1→3 every 5 minutes with no traffic changes. What is the most likely cause, and how do you fix it?**
+
+A. The HPA has two conflicting metrics — remove one
+B. `scaleDown.stabilizationWindowSeconds: 0` is set — raise it to 300 or higher
+C. AmbiguousSelector — delete the duplicate HPA
+D. maxReplicas is set too low — raise it
+
+<details>
+<summary>Answer</summary>
+
+**B** — oscillation between 3 and 1 every 5 minutes with no traffic change is the classic symptom of `stabilizationWindowSeconds: 0` on scaleDown. The metric briefly dips below target after scale-out, immediately triggering scale-in, then load returns and triggers scale-out again. The 5-minute default window prevents this by waiting to confirm the load has genuinely dropped.
+
+Trap A: conflicting metrics would show `<unknown>` or AmbiguousSelector, not oscillation. Trap C: AmbiguousSelector freezes both HPAs. Trap D: hitting maxReplicas would show ScalingLimited True.
+
+</details>
+
+---
+
+**Q20. (CKA-style) `kubectl describe hpa` shows `ScalingLimited: True, TooManyReplicas`. Deployment has 10 replicas. Is this an error?**
+
+A. Yes — HPA should never hit maxReplicas; increase resources
+B. No — this is expected when demand exceeds what maxReplicas can handle; raise maxReplicas if more scale is genuinely needed
+C. Yes — it means minReplicas and maxReplicas are equal
+D. No — it means HPA is paused by the operator
+
+<details>
+<summary>Answer</summary>
+
+**B** — `TooManyReplicas` means HPA wants to scale beyond maxReplicas but cannot because of the configured ceiling. This is expected behaviour. If the load genuinely requires more pods, raise `maxReplicas`. If the cap is intentional (cost or capacity limit), the Deployment will stay at maxReplicas under load.
+
+Trap A: this is not an error — it is expected functioning. Trap C: ScalingLimited TooFewReplicas would indicate minReplicas constraint. Trap D: no such pause mechanism in HPA.
+
+</details>
+
+---
+
+| Score | Action |
+|---|---|
+| 20/20 | Import Anki cards, move to 02-hpa-advanced |
+| 18–19/20 | Review the wrong answers, then proceed |
+| 17/20 | Re-read relevant Concepts sections, retry those questions |
+| Below 17/20 | Re-read the full lab and redo the walkthrough before proceeding |
+````
