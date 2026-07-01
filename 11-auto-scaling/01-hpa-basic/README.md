@@ -2428,33 +2428,29 @@ HPA was designed before the Eviction API matured. Its scale-down path uses direc
 
 ---
 
-## Cert Tips
+## CKA/CKAD Certification Tips
 
 ### Exam Objective Mapping
 
-| Demo concept / command | Exam objective | Notes |
-|---|---|---|
-| HPA API version `autoscaling/v2` | CKA-domain2 — Workloads & Scheduling | Always use v2; v1 is stored as v2 internally anyway |
-| HPA scaling formula `ceil[currentReplicas × (current/target)]` | CKA-domain2 — Workloads & Scheduling | Must be able to apply manually in exam questions |
-| `kubectl autoscale deployment <name> --cpu=50% --min=1 --max=5` | CKA-domain2 — Workloads & Scheduling | Use `--cpu=50%` not `--cpu-percent` (deprecated) |
-| `<unknown>` in TARGETS — missing `resources.requests` | CKA-domain5 — Troubleshooting | Most common HPA troubleshooting question in CKA |
-| `AbleToScale: False` vs `ScalingActive: False` | CKA-domain5 — Troubleshooting | ScalingActive False = pipeline broken; AbleToScale False = in cooldown (often normal) |
-| `behavior.scaleDown.stabilizationWindowSeconds: 300` | CKA-domain2 — Workloads & Scheduling | Default is 300s (5 min); 0 = immediate scale-down |
-| `selectPolicy: Disabled` | CKA-domain5 — Troubleshooting | Blocks all scaling in that direction — valid YAML, no error at apply time |
-| `type: Utilization` vs `type: AverageValue` for CPU | CKA-domain2 — Workloads & Scheduling | Utilization = %; AverageValue = raw quantity (nanocores, bytes) |
-| One HPA per workload — AmbiguousSelector | CKA-domain5 — Troubleshooting | Two HPAs on same Deployment → both stop working |
+| Demo concept / command | CKA objective | CKAD objective | Notes |
+|---|---|---|---|
+| HPA, VPA, CA — types and ownership overview | Workloads & Scheduling (15%) | Application Deployment (20%) | Conceptual foundation for both exams; CA requires cloud infra and is theory-only in this demo |
+| cAdvisor / metrics-server architecture, Metrics API | Troubleshooting (30%) | Application Observability and Maintenance (15%) | Understanding the pipeline is the prerequisite for diagnosing `<unknown>` HPA/VPA metrics on either exam |
+| HPA v2 YAML — `scaleTargetRef`, `minReplicas`/`maxReplicas`, `Resource` metric | Workloads & Scheduling (15%) | Application Deployment (20%) | Both exams expect a working HPA manifest under time pressure; `kubectl autoscale` + edit is faster than writing YAML from scratch |
+| HPA scaling formula and tolerance | Workloads & Scheduling (15%) | Application Deployment (20%) | Task may show `kubectl describe hpa` output and require the resulting replica count |
+| Scale-down stabilisation window (default 300s) | Workloads & Scheduling (15%) | Application Deployment (20%) | Common trap: expecting scale-down within seconds of load dropping |
+| HPA `behavior` — `Pods`-type policies | Workloads & Scheduling (15%) | Application Deployment (20%) | CKAD tasks are more likely to probe `behavior` tuning specifics; CKA tasks more likely to test default values |
+| HPA + PDB — why HPA bypasses the Eviction API | Troubleshooting (30%) | Application Observability and Maintenance (15%) | More heavily weighted on CKA (cluster-level disruption behaviour) than CKAD |
+| `<unknown>` HPA metric — missing `resources.requests` | Troubleshooting (30%) | Application Environment, Configuration and Security (25%) | CKAD's Environment/Config/Security domain directly owns resource requests/limits |
 
 ### Common Exam Traps
 
-| Question pattern | Correct answer | Why wrong answers fail |
+| Scenario | What the task actually requires | Common wrong approach |
 |---|---|---|
-| "kubectl top shows CPU usage but HPA shows `<unknown>`" | Missing `resources.requests.cpu` on at least one container — HPA needs the request to compute utilisation% | "Wait longer" is wrong for permanent `<unknown>`; `kubectl top` working is a red herring — cAdvisor and HPA have different requirements |
-| "`kubectl autoscale --cpu-percent=50`" | Wrong — `--cpu-percent` is deprecated; use `--cpu=50%` | The deprecated flag may still work on some clusters but is not the exam-expected form |
-| "Two HPAs targeting the same Deployment — which one wins?" | Neither — both stop working (AmbiguousSelector); delete the extra one | There is no precedence; the conflict breaks both HPAs |
-| "HPA will respect PDB during scale-down" | False — HPA uses direct DELETE, bypassing the Eviction API and PDB | This is a known HPA design limitation; VPA Updater and `kubectl drain` DO respect PDB |
-| "`ScalingActive: False` means HPA is in cooldown" | False — `ScalingActive: False` means the metric pipeline is broken (cannot compute). Cooldown is `AbleToScale: False` | These two conditions are distinct; ScalingActive False is the more serious one |
-| "`type: AverageValue, averageValue: 50` means target 50% CPU" | False — AverageValue with no unit suffix means 50 nanocores (not 50%). For 50% use `type: Utilization, averageUtilization: 50`. For 50 millicores use `type: AverageValue, averageValue: "50m"` | The unit difference between Utilization and AverageValue is a classic exam trap |
-| "`behavior.scaleDown.selectPolicy: Disabled` still uses the policies list" | False — `Disabled` overrides all policies; the policies list entries are ignored | Valid YAML, no error, but completely blocks scale-down |
+| `kubectl describe hpa` shows `<unknown>` right after creating the HPA and starting load | Wait 30-60s for metrics-server's first scrape cycle before treating this as broken; only check `resources.requests` if it's still `<unknown>` after that | Immediately rewriting the HPA manifest, or checking `resources.requests` first when the real issue is just transient timing |
+| Load has dropped to 0% but the task's time budget expects scale-down to have happened already | Know that default `scaleDown.stabilizationWindowSeconds` is 300s; wait it out, or set a shorter `behavior.scaleDown.stabilizationWindowSeconds` if the task calls for fast scale-down | Treating a still-high replica count after 30-60 seconds as a bug and deleting/recreating the HPA |
+| Task says "create an HPA that scales at 50% CPU" via the imperative command | `kubectl autoscale deployment X --cpu=50% --min=1 --max=5` — current, non-deprecated flag, with `--min`/`--max` both set | Using the deprecated `--cpu-percent=50` flag, or omitting `--min`/`--max` (both required) |
+| Task ends up with two HPA objects both targeting the same Deployment | Recognize `AmbiguousSelector` in HPA events and delete the extra HPA — only one HPA per workload is valid | Assuming the HPAs will "merge" their metrics, or that the most recently applied one silently takes over |
 
 ---
 
@@ -2502,45 +2498,6 @@ HPA was designed before the Eviction API matured. Its scale-down path uses direc
 
 ---
 
-## CKA Certification Tips
-
-✅ **HPA API version — always autoscaling/v2:**
-```yaml
-apiVersion: autoscaling/v2
-kind: HorizontalPodAutoscaler
-```
-
-✅ **HPA scaling formula — know and apply it:**
-```
-desiredReplicas = ceil[currentReplicas x (currentValue / targetValue)]
-```
-
-✅ **Resource requests are mandatory for utilisation-based HPA** — without them, TARGETS shows `<unknown>`
-
-✅ **One HPA per workload** — two HPAs on the same Deployment cause AmbiguousSelector conflict
-
-✅ **Scale-down default stabilisation = 5 minutes (300 seconds)**
-
-✅ **kubectl autoscale modern format:**
-```bash
-kubectl autoscale deployment <name> --cpu=50% --min=1 --max=5
-# NOT --cpu-percent (deprecated)
-```
-
-✅ **`<unknown>` in TARGETS:**
-```
-Transient:   wait 30-60s after pod creation (first metrics-server scrape)
-Persistent:  resources.requests not set on all containers in the pod
-```
-
-✅ **cAdvisor vs metrics-server retention:**
-```
-cAdvisor:       zero retention — live snapshot only
-metrics-server: one sample per pod (most recent only)
-VPA:            8 days (in VPACheckpoint histogram)
-```
-
----
 
 ## Troubleshooting
 

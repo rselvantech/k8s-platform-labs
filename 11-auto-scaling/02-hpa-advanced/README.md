@@ -1644,26 +1644,27 @@ For `type: Resource`, every container in the pod must have `resources.requests.c
 
 ---
 
-## Cert Tips
+## CKA/CKAD Certification Tips
 
 ### Exam Objective Mapping
 
-| Demo concept / command | Exam objective | Notes |
-|---|---|---|
-| `ContainerResource` metric type | CKA-domain2 — Workloads & Scheduling | GA since v1.30; permanently `<unknown>` on older clusters is a version gap, not a config error |
-| `behavior` with `Percent`-type policies | CKA-domain2 — Workloads & Scheduling | Exam may show a partial `behavior` block and ask for the resulting replica count |
-| `kubectl top pod --containers` | CKA-domain5 — Troubleshooting | Per-container resource diagnosis on multi-container pods |
-| `<unknown>` HPA metric diagnosis | CKA-domain5 — Troubleshooting | Most common root cause: missing `resources.requests` on one or more containers |
-| Custom/External Metrics API (conceptual) | CKA-domain2 — Workloads & Scheduling | Adapter installation/configuration is out of scope for CKA — concept-level only |
+| Demo concept / command | CKA objective | CKAD objective | Notes |
+|---|---|---|---|
+| `ContainerResource` metric type | Workloads & Scheduling (15%) | Application Deployment (20%) | GA since v1.30; permanently `<unknown>` on older clusters is a version gap, not a config error |
+| `behavior` with `Percent`-type policies | Workloads & Scheduling (15%) | Application Deployment (20%) | Task may define a partial `behavior` block and require the resulting replica count after N periods |
+| `kubectl top pod --containers` | Troubleshooting (30%) | Application Observability and Maintenance (15%) | Per-container resource diagnosis — the step before choosing `Resource` vs `ContainerResource` |
+| `<unknown>` metric caused by ONE container missing a request | Troubleshooting (30%) | Application Environment, Configuration and Security (25%) | Whole-pod metric goes `<unknown>`, not just that container's share — same mechanism as Demo 01, harder to spot in a multi-container manifest |
+| Custom/External Metrics API concept (`Pods`/`Object`/`External`) | Workloads & Scheduling (15%) | Application Deployment (20%) | Adapter installation/configuration is generally out of scope for either exam — concept-level only |
+| Metric-type decision framework | Workloads & Scheduling (15%) | Application Deployment (20%) | Task may present a scaling scenario and require identifying which metric type applies |
 
 ### Common Exam Traps
 
-| Question pattern | Correct answer | Why wrong answers fail |
+| Scenario | What the task actually requires | Common wrong approach |
 |---|---|---|
-| "HPA with `type: Resource` scales on sidecar CPU spike — `app` load unchanged" | Expected behaviour — `Resource` averages across all containers; fix is `ContainerResource` | "Increase `maxReplicas`" does not address root cause; "remove the sidecar" is not always viable |
-| "`behavior.scaleUp` Percent 100 — replicas jump straight to desired value of 8 from 1" | False — step is capped at 100% of current count; multiple periods needed (1, 2, 4, 8) | Assumes behavior policy IS the scaling decision rather than a rate limiter on it |
-| "`<unknown>` CPU on 2-container pod; one container lacks `resources.requests.cpu`" | Entire pod's metric is `<unknown>` — not just the missing container's share | Assuming partial metric (only the container with a request contributes) or that missing request defaults to `0m` |
-| "`ContainerResource` requires a metrics adapter like `Pods`/`Object`/`External`" | False — `ContainerResource` is served by metrics-server, same as `Resource` | Conflates the adapter requirement of `Pods`/`Object`/`External` with `ContainerResource` |
+| Task's pod has an `app` container and a `sidecar`; after applying a `Resource`-type HPA, a burst of sidecar activity causes an unwanted scale-out | Recognize `Resource` averages usage across all containers, and switch to `ContainerResource` scoped to `container: app` to isolate the signal | Raising `maxReplicas` to "absorb" the noise, or removing the sidecar, instead of switching metric type |
+| Task defines `behavior.scaleUp` with a `Percent` policy of `value: 100` and expects the Deployment to jump straight from 1 replica to the formula's desired count of 8 in one evaluation | Understand `Percent` policies cap the step at 100% of the *current* count per period — reaching 8 from 1 takes multiple periods (1→2→4→8), not one | Concluding the behavior policy is broken because the jump isn't immediate, and removing the `behavior` block entirely |
+| Task's 2-container pod has `resources.requests.cpu` on `app` but not on `sidecar`; the HPA metric shows `<unknown>` even though `kubectl top pod` shows `app`'s usage fine | Recognize that for `Resource`-type HPA, ANY container missing a CPU request makes the WHOLE pod's metric `<unknown>` — add the missing request to `sidecar`, not just double-check `app` | Assuming the metric is partially working because `app` clearly has a valid request, and looking elsewhere (metrics-server health, HPA YAML) for the fault |
+| Task asks to scale on a metric that isn't CPU or memory, and the first instinct is to reach for a metrics adapter as step one | Recognize `ContainerResource` (like `Resource`) is served by metrics-server alone — no adapter needed; adapters are only required for `Pods`/`Object`/`External` types | Assuming any non-`Resource` metric type automatically needs a custom metrics adapter, including `ContainerResource` |
 
 ---
 
@@ -1936,7 +1937,7 @@ Trap A: External requires an adapter. Trap B: Object targeting the Deployment is
 | Score | Action |
 |---|---|
 | 8/8 | Import Anki cards, move to 03-vpa-fundamentals |
-| 7/8 | Review wrong answer, proceed |
+| 7/8 | Review the wrong answer, then proceed |
 | 6/8 | Re-read relevant section, retry those questions |
 | Below 6/8 | Re-read full lab and redo walkthrough before proceeding |
 ````

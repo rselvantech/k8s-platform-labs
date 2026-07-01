@@ -1,0 +1,11 @@
+apiVersion: autoscaling.k8s.io/v1
+kind: VerticalPodAutoscaler
+metadata:
+  name: standalone-pod-vpa
+spec:
+  targetRef:
+    apiVersion: v1
+    kind: Pod                 # BUG: targeting a standalone Pod directly
+    name: my-standalone-pod  # not managed by any controller
+  updatePolicy:
+    updateMode: "Recreate"
