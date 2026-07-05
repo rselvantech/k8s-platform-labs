@@ -1,0 +1,40 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nginx-no-requests
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: nginx-no-requests
+  template:
+    metadata:
+      labels:
+        app: nginx-no-requests
+    spec:
+      terminationGracePeriodSeconds: 0
+      containers:
+        - name: nginx
+          image: nginx:1.27
+          ports:
+            - containerPort: 80
+          # BUG: no resources block — no requests, no limits
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: hpa-no-requests
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: nginx-no-requests
+  minReplicas: 1
+  maxReplicas: 5
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 50

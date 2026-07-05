@@ -1,0 +1,22 @@
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: hpa-wrong-target
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: nginx-deploy
+  minReplicas: 1
+  maxReplicas: 5
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: AverageValue      # BUG: using AverageValue instead of Utilization
+          averageValue: "50"      # BUG: this means "50 nanocores", not "50%"
+                                  # For Utilization: 50 means 50% of request
+                                  # For AverageValue: 50 means 50 nanocores (0.05m)
+                                  # nginx at idle already uses ~2m CPU
+                                  # so HPA immediately sees usage >> target

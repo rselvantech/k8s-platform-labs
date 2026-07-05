@@ -1,0 +1,21 @@
+# This file creates a SECOND HPA targeting nginx-deploy.
+# The first HPA (nginx-hpa-cpu) already exists from Step 4.
+# Apply this while nginx-hpa-cpu is still running.
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: hpa-duplicate       # BUG: different name, same scaleTargetRef
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: nginx-deploy      # same Deployment as nginx-hpa-cpu
+  minReplicas: 2
+  maxReplicas: 8
+  metrics:
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: 70
