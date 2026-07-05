@@ -21,7 +21,7 @@ spec:
       stabilizationWindowSeconds: 0  # scale up immediately (default)
       selectPolicy: Max
       policies:
-        - type: Percent              # Percent, not Pods (compare with 01-autoscaling Step 8)
+        - type: Percent              # Percent, not Pods (compare with 01-hpa-basic Step 8)
           value: 100                 # double current replica count...
           periodSeconds: 30          # ...at most once per 30 seconds
     scaleDown:

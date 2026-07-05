@@ -1400,7 +1400,12 @@ In this lab, you:
 
 ## Break-Fix
 
-Three broken manifests below. For each: apply it, read the symptom from the cluster, diagnose, then reveal the answer.
+Three broken manifests below. For each: apply it, read the symptom from the cluster, diagnose, then reveal the answer. Each scenario ends with an explicit cleanup step — run it before starting the next scenario.
+
+From here on, all commands in this section assume you're working from inside the `break-fix/` directory:
+```bash
+cd break-fix/
+```
 
 ---
 
@@ -1431,8 +1436,8 @@ spec:
 ```
 
 ```bash
-kubectl apply -f 01-deployment-sidecar.yaml
-kubectl apply -f break-fix/01-wrong-container-name.yaml
+kubectl apply -f ../01-deployment-sidecar.yaml
+kubectl apply -f 01-wrong-container-name.yaml
 kubectl describe hpa app-hpa-container-resource
 ```
 
@@ -1456,6 +1461,12 @@ Conditions:
 **Cascade:** While `ScalingActive: False`, the HPA never scales the Deployment regardless of load — `REPLICAS` stays frozen at whatever it was when the HPA was created.
 
 </details>
+
+**Cleanup:**
+```bash
+kubectl delete -f 01-wrong-container-name.yaml --ignore-not-found
+```
+(the `multi-container-app` Deployment stays running — it's reused as-is by Error-2)
 
 ---
 
@@ -1501,8 +1512,7 @@ spec:
 ```
 
 ```bash
-kubectl delete -f break-fix/01-wrong-container-name.yaml
-kubectl apply -f break-fix/02-stuck-scale-up-stabilization.yaml
+kubectl apply -f 02-stuck-scale-up-stabilization.yaml
 kubectl exec deploy/multi-container-app -c app -- \
   sh -c "while true; do dd if=/dev/urandom of=/dev/null bs=1M count=100; done"
 # wait ~2 minutes, then:
@@ -1531,6 +1541,13 @@ Behavior:
 **Cascade:** Under sustained load, the Deployment under-serves traffic for up to 5 minutes after every load increase. Easy to misdiagnose as "the load generator is not working" or "metrics-server is slow" — nothing in the cluster reports an error.
 
 </details>
+
+**Cleanup:**
+```bash
+# stop the CPU load loop first — Ctrl+C the kubectl exec session from above
+kubectl delete -f 02-stuck-scale-up-stabilization.yaml --ignore-not-found
+kubectl delete -f ../01-deployment-sidecar.yaml --ignore-not-found
+```
 
 ---
 
@@ -1591,10 +1608,8 @@ spec:
 ```
 
 ```bash
-kubectl delete -f break-fix/02-stuck-scale-up-stabilization.yaml
-kubectl delete -f 01-deployment-sidecar.yaml
-kubectl apply -f break-fix/03-deployment-missing-request.yaml
-kubectl apply -f 03-hpa-behavior-percent.yaml
+kubectl apply -f 03-deployment-missing-request.yaml
+kubectl apply -f ../03-hpa-behavior-percent.yaml
 # wait ~1 minute, then:
 kubectl describe hpa app-hpa-behavior-percent | grep -A2 "Metrics:"
 kubectl top pod --containers
@@ -1617,6 +1632,13 @@ Metrics:
 **Cascade:** Same root cause as `01-hpa-basic`'s documented `<unknown>` troubleshooting entry — but here it is caused by ONE container out of several, easy to miss when skimming a multi-container manifest.
 
 </details>
+
+**Cleanup:**
+```bash
+kubectl delete -f 03-deployment-missing-request.yaml --ignore-not-found
+kubectl delete -f ../03-hpa-behavior-percent.yaml --ignore-not-found
+cd ..
+```
 
 ---
 
@@ -1792,10 +1814,10 @@ kubectl exec deploy/multi-container-app -c <container> -- which dd sh
 
 **Q1. You have a 2-container pod (`app` + `sidecar`) and apply an HPA with `type: Resource` targeting CPU. The `sidecar` starts consuming significant CPU. What is the risk?**
 
-A. None — sidecar containers are excluded from Resource-type metrics automatically
-B. The HPA may scale the Deployment based on the sidecar's load, not just app's load
-C. The HPA fails with a MultipleContainers error
-D. Resource type can only be used on single-container pods
+- A) None — sidecar containers are excluded from Resource-type metrics automatically
+- B) The HPA may scale the Deployment based on the sidecar's load, not just app's load
+- C) The HPA fails with a MultipleContainers error
+- D) Resource type can only be used on single-container pods
 
 <details>
 <summary>Answer</summary>
@@ -1810,10 +1832,10 @@ Trap A: no automatic exclusion — sidecars are included. Trap C: no such error 
 
 **Q2. You want an HPA to scale based ONLY on the `app` container's CPU in a 2-container pod. Which `metrics[]` entry is correct?**
 
-A. {type: Resource, resource: {name: cpu, container: app, target: {...}}}
-B. {type: ContainerResource, containerResource: {name: cpu, container: app, target: {...}}}
-C. {type: Pods, pods: {metric: {name: app_cpu}, target: {...}}}
-D. {type: Resource, resource: {name: cpu, target: {...}}, selector: {matchLabels: {container: app}}}
+- A) {type: Resource, resource: {name: cpu, container: app, target: {...}}}
+- B) {type: ContainerResource, containerResource: {name: cpu, container: app, target: {...}}}
+- C) {type: Pods, pods: {metric: {name: app_cpu}, target: {...}}}
+- D) {type: Resource, resource: {name: cpu, target: {...}}, selector: {matchLabels: {container: app}}}
 
 <details>
 <summary>Answer</summary>
@@ -1828,10 +1850,10 @@ Trap A: Resource has no container field — always covers the whole pod. Trap C:
 
 **Q3. An HPA's `behavior.scaleUp` has `{policies: [{type: Percent, value: 100, periodSeconds: 30}], stabilizationWindowSeconds: 0}`. Starting at 1 replica, the metric immediately justifies 8 replicas. After the first 30-second evaluation, what is the replica count?**
 
-A. 8 — Percent policies do not limit the jump to the formula's desired value
-B. 1 — value: 100 means scale-up is disabled
-C. 2 — the step is capped at 100% of the current replica count
-D. 0 — Percent requires minReplicas: 0 to function
+- A) 8 — Percent policies do not limit the jump to the formula's desired value
+- B) 1 — value: 100 means scale-up is disabled
+- C) 2 — the step is capped at 100% of the current replica count
+- D) 0 — Percent requires minReplicas: 0 to function
 
 <details>
 <summary>Answer</summary>
@@ -1846,10 +1868,10 @@ Trap A: the policy is a rate limiter, not a pass-through. Trap B: value: 100 mea
 
 **Q4. 01-hpa-basic's scaleUp policy was `{type: Pods, value: 4, periodSeconds: 15}`. This lab's is `{type: Percent, value: 100, periodSeconds: 30}`. Starting from 10 replicas with sustained high demand, which adds more replicas in the first 30 seconds?**
 
-A. The Pods policy — up to 8 replicas (4 per 15s x 2 windows) vs Percent's +10
-B. The Percent policy — up to 10 replicas (100% of 10) vs Pods' +8
-C. They are identical — both capped at 4 replicas per evaluation
-D. Neither — periodSeconds must match to compare them
+- A) The Pods policy — up to 8 replicas (4 per 15s x 2 windows) vs Percent's +10
+- B) The Percent policy — up to 10 replicas (100% of 10) vs Pods' +8
+- C) They are identical — both capped at 4 replicas per evaluation
+- D) Neither — periodSeconds must match to compare them
 
 <details>
 <summary>Answer</summary>
@@ -1864,10 +1886,10 @@ Trap A: Pods arithmetic is correct but the conclusion is wrong. Trap C: the type
 
 **Q5. A 2-container pod has `app` with `resources.requests.cpu: 100m` and `sidecar` with no `resources.requests` block. An HPA with `type: Resource` targeting cpu is applied. What does `kubectl describe hpa` show for the CPU metric?**
 
-A. The utilisation of app only, since it is the only container with a request
-B. unknown for the whole pod's CPU metric
-C. 0%, since the missing request is treated as zero
-D. The HPA fails to create with a validation error
+- A) The utilisation of app only, since it is the only container with a request
+- B) unknown for the whole pod's CPU metric
+- C) 0%, since the missing request is treated as zero
+- D) The HPA fails to create with a validation error
 
 <details>
 <summary>Answer</summary>
@@ -1882,10 +1904,10 @@ Trap A: no per-container fallback for Resource type. Trap C: missing request is 
 
 **Q6. Which statement correctly distinguishes the `Pods` and `Object` HPA metric types?**
 
-A. Pods reads from metrics-server; Object reads from the Custom Metrics API
-B. Pods averages a custom metric across all pods of the target; Object reads a single metric from one specific Kubernetes object
-C. Object is for CPU/memory; Pods is for everything else
-D. They are interchangeable — both compute the same value with different syntax
+- A) Pods reads from metrics-server; Object reads from the Custom Metrics API
+- B) Pods averages a custom metric across all pods of the target; Object reads a single metric from one specific Kubernetes object
+- C) Object is for CPU/memory; Pods is for everything else
+- D) They are interchangeable — both compute the same value with different syntax
 
 <details>
 <summary>Answer</summary>
@@ -1900,10 +1922,10 @@ Trap A: BOTH read from custom.metrics.k8s.io — metrics-server serves neither. 
 
 **Q7. Your team wants to scale a worker Deployment based on the depth of an AWS SQS queue. Which combination is correct?**
 
-A. type: Resource, since SQS depth is a resource metric
-B. type: External, reading from external.metrics.k8s.io, exposed via a metrics adapter
-C. type: Object, since SQS is a Kubernetes object
-D. metrics-server alone, once kubectl top is enabled
+- A) type: Resource, since SQS depth is a resource metric
+- B) type: External, reading from external.metrics.k8s.io, exposed via a metrics adapter
+- C) type: Object, since SQS is a Kubernetes object
+- D) metrics-server alone, once kubectl top is enabled
 
 <details>
 <summary>Answer</summary>
@@ -1918,10 +1940,10 @@ Trap A: Resource is strictly CPU/memory from metrics-server. Trap C: SQS queues 
 
 **Q8. (CKA-style) A Deployment's pods each run a single container. You want to scale based on that container's memory usage and metrics-server is running. Which metric type requires the LEAST additional setup?**
 
-A. External, since it is the most flexible
-B. Object, targeting the Deployment itself
-C. Resource, with name: memory
-D. Pods, with a custom memory metric
+- A) External, since it is the most flexible
+- B) Object, targeting the Deployment itself
+- C) Resource, with name: memory
+- D) Pods, with a custom memory metric
 
 <details>
 <summary>Answer</summary>
