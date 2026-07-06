@@ -1,0 +1,24 @@
+apiVersion: autoscaling.k8s.io/v1
+kind: VerticalPodAutoscaler
+metadata:
+  name: nginx-vpa-conflict
+spec:
+  targetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: nginx-deploy
+  updatePolicy:
+    updateMode: "Off"        # Use Off mode for conflict OBSERVATION (safe)
+                              # Recreate would need ≥2 replicas to evict
+                              # The conceptual conflict exists regardless of mode:
+                              # VPA recommends changing requests → if applied,
+                              # HPA's formula denominator changes → oscillation
+  resourcePolicy:
+    containerPolicies:
+      - containerName: nginx
+        minAllowed:
+          cpu: 50m
+          memory: 64Mi
+        maxAllowed:
+          cpu: 1
+          memory: 1Gi

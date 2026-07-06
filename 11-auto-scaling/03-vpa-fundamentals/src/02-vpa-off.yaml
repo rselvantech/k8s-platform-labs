@@ -7,8 +7,10 @@ spec:
     apiVersion: apps/v1
     kind: Deployment
     name: nginx-deploy
-  updatePolicy:
-    updateMode: "Off"           # observe only — Updater never evicts, Admission never patches
+  # updatePolicy:
+  #   updateMode: "Off"           # observe only — Updater never evicts, Admission never patches
+  updatePolicy: # Add to 02-vpa-off.yaml or create separately — change updateMode only
+    updateMode: "Initial"
   resourcePolicy:
     containerPolicies:
       - containerName: nginx

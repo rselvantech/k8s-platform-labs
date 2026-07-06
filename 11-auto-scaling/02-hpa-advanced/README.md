@@ -1211,45 +1211,118 @@ Behavior:
 
 **Burn CPU in `app`:**
 
+**Burn CPU in `app`:**
 ```bash
 kubectl exec deploy/multi-container-app -c app -- \
   sh -c "while true; do dd if=/dev/urandom of=/dev/null bs=1M count=100; done"
-
 kubectl get hpa app-hpa-behavior-percent -w
 ```
 
-**Expected output — doubling pattern (compare with 01-hpa-basic Step 8's linear `+4`):**
+> **Note:** `kubectl exec` against a Deployment always lands on exactly ONE
+> pod — not every replica. As the HPA scales out, only this original pod
+> carries any load; every new pod starts idle. Because `type: Resource`
+> averages usage across ALL pods matching the target, each new idle pod
+> dilutes the reported percentage. Expect doubling to accelerate initially,
+> then decelerate and plateau well short of maxReplicas, rather than a
+> clean run to 8 or 10.
+
+**Real captured output (your exact numbers and timing will vary, but the shape will match):**
 ```
-NAME                      REFERENCE                       TARGETS          MINPODS  MAXPODS  REPLICAS
-app-hpa-behavior-percent  Deployment/multi-container-app  cpu: 115%/50%    1        10       1
-app-hpa-behavior-percent  Deployment/multi-container-app  cpu: 115%/50%    1        10       2   <- +100% of 1
-app-hpa-behavior-percent  Deployment/multi-container-app  cpu: 115%/50%    1        10       4   <- +100% of 2
+NAME                       REFERENCE                        TARGETS         MINPODS  MAXPODS  REPLICAS  AGE
+app-hpa-behavior-percent   Deployment/multi-container-app   cpu: 0%/50%     1        10       1         2m30s
+app-hpa-behavior-percent   Deployment/multi-container-app   cpu: 90%/50%    1        10       1         3m49s
+app-hpa-behavior-percent   Deployment/multi-container-app   cpu: 90%/50%    1        10       2         4m2s
+app-hpa-behavior-percent   Deployment/multi-container-app   cpu: 264%/50%   1        10       2         4m46s
+app-hpa-behavior-percent   Deployment/multi-container-app   cpu: 264%/50%   1        10       4         5m1s
+app-hpa-behavior-percent   Deployment/multi-container-app   cpu: 264%/50%   1        10       6         5m29s
+app-hpa-behavior-percent   Deployment/multi-container-app   cpu: 132%/50%   1        10       6         5m43s
+app-hpa-behavior-percent   Deployment/multi-container-app   cpu: 44%/50%    1        10       6         6m40s
+```
+```
+# Observation: replicas double for the first two evaluations (1->2->4)
+# while the metric stays pegged at 264% — the loaded pod's raw usage
+# hasn't changed, but each new idle pod's request is added to the
+# denominator, so the reported average keeps climbing toward (and past)
+# the target ratio rather than staying flat. By replicas=6, dilution has
+# pulled the average down to 44% — BELOW the 50% target — even though
+# exactly one pod is still fully loaded. This is dilution, not throttling
+# and not any stabilization effect.
 ```
 
+**Find which pod is actually carrying the load, then stop it precisely:**
+```bash
+kubectl top pod -l app=multi-container-app --containers
 ```
-# Observation: REPLICAS roughly doubles each evaluation (1->2->4), one
-# scaleUp.periodSeconds (30s) apart — not a direct jump to the formula's
-# desired value.
+```
+POD                                    NAME      CPU(cores)   MEMORY(bytes)
+multi-container-app-64d56889f5-4m764   app       0m           12Mi
+multi-container-app-64d56889f5-5vlsc   app       0m           13Mi
+multi-container-app-64d56889f5-dw7kh   app       0m           12Mi
+multi-container-app-64d56889f5-g9d4g   app       0m           12Mi
+multi-container-app-64d56889f5-hrqh7   app       528m         14Mi   <- this is the loaded pod
+multi-container-app-64d56889f5-vcpds   app       0m           13Mi
+```
+```
+# If every pod shows 0m, the metrics-server scrape window hasn't
+# refreshed yet — wait ~15-30s and rerun.
 ```
 
-**Stop the load (`Ctrl+C`), then watch scale-down:**
+> **Warning:** Pressing `Ctrl+C` on the `kubectl exec` session above does
+> NOT reliably stop the loop — the client disconnecting does not signal
+> the remote process, which keeps running in the background invisibly.
+> Verify with `kubectl top pod` as above rather than trusting Ctrl+C.
+> Also don't reach for `pkill`/`ps` inside the container — minimal images
+> like `nginx:1.27` don't ship `procps`, so those commands fail with
+> `executable file not found in $PATH`.
 
+**Stop it by deleting only the specific loaded pod — no need to delete every pod:**
+```bash
+kubectl delete pod multi-container-app-64d56889f5-hrqh7   # use the pod name from YOUR OWN kubectl top output
+```
+```
+pod "multi-container-app-64d56889f5-hrqh7" deleted from default namespace
+```
+```bash
+kubectl top pod -l app=multi-container-app --containers
+```
+```
+# Confirm every remaining pod shows 0m CPU before proceeding. If a
+# different pod now shows load, repeat the identify-and-delete step
+# for that one instead.
+```
+
+**Watch scale-down:**
 ```bash
 kubectl get hpa app-hpa-behavior-percent -w
 ```
-
-**Expected output — halving pattern:**
+**Real captured output:**
 ```
-NAME                      REFERENCE                       TARGETS       MINPODS  MAXPODS  REPLICAS
-app-hpa-behavior-percent  Deployment/multi-container-app  cpu: 0%/50%   1        10       4
-app-hpa-behavior-percent  Deployment/multi-container-app  cpu: 0%/50%   1        10       2   <- -50% of 4, after 60s stabilisation
-app-hpa-behavior-percent  Deployment/multi-container-app  cpu: 0%/50%   1        10       1   <- -50% of 2
+NAME                       REFERENCE                        TARGETS       MINPODS  MAXPODS  REPLICAS  AGE
+app-hpa-behavior-percent   Deployment/multi-container-app   cpu: 0%/50%   1        10       6         13m
+app-hpa-behavior-percent   Deployment/multi-container-app   cpu: 0%/50%   1        10       6         14m
+app-hpa-behavior-percent   Deployment/multi-container-app   cpu: 0%/50%   1        10       3         14m   <- -50% of 6, capped by the Percent policy
+app-hpa-behavior-percent   Deployment/multi-container-app   cpu: 0%/50%   1        10       3         15m
+app-hpa-behavior-percent   Deployment/multi-container-app   cpu: 0%/50%   1        10       1         15m   <- desired value (1, the minReplicas floor) reached directly
 ```
-
 ```
-# Observation: scaleDown waits 60s (stabilisation window) before the
-# first step, then removes ~50% of current replicas per 60s — compare
-# with 01-hpa-basic Step 8's Pods-based "-2 per 60s" scaleDown.
+# Observation: the Deployment settled at 5 pods immediately after the
+# delete — NOT back at 6 — because the ReplicaSet controller and the HPA
+# controller both act on spec.replicas independently. By the time the
+# ReplicaSet would normally have created a replacement for the deleted
+# pod, the HPA had already started lowering spec.replicas toward its
+# own (much smaller, post-dilution) desired count. Deleting a pod does
+# NOT guarantee a same-count replacement if the HPA changes the target
+# replica count around the same moment — the ReplicaSet reconciles
+# toward whatever spec.replicas currently says, not toward "replace
+# exactly what was deleted."
+#
+# The halving steps land on 6->3->1 rather than a clean 4->2->1: the
+# scaleDown Percent policy caps the MAXIMUM removal per 60s window at
+# ceil(currentReplicas * 0.5), but the actual step taken is whichever is
+# LESS aggressive between that cap and the raw formula's desired value.
+# At 3 replicas, the cap allows removing up to 2 (ceil(3*0.5)=2), and
+# the desired value from 0% CPU is already 1 (the minReplicas floor) —
+# so it drops straight to 1 in one step, rather than pausing at 2 first.
 ```
 
 **Cleanup:**
