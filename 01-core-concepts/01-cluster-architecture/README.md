@@ -1,4 +1,4 @@
-# Cluster Architecture — Control Plane, Worker Nodes, and Component Interactions
+# Demo: 01-core-concepts/01-cluster-architecture — Cluster Architecture
 
 ## Lab Overview
 
@@ -51,13 +51,17 @@ By the end of this lab, you will be able to:
 ## Directory Structure
 
 ```
-01-cluster-architecture/
-└── README.md    # This file — theory + observation steps
+01-core-concepts/01-cluster-architecture/
+├── README.md                                # this file
+├── 01-cluster-architecture-anki.csv         # Anki flashcard deck
+└── 01-cluster-architecture-quiz.md          # standalone quiz
 ```
 
 ---
 
-## Kubernetes Architecture Overview
+## Concepts
+
+### Kubernetes Architecture Overview
 
 ### The Two-Tier Model
 
@@ -92,7 +96,7 @@ This design makes the cluster auditable, securable, and consistent.
 
 ---
 
-## Control Plane Components — Deep Dive
+### Control Plane Components — Deep Dive
 
 ### kube-apiserver
 
@@ -112,8 +116,10 @@ Scaling:  Horizontal — you can run multiple apiserver replicas behind
           a load balancer. Each replica is stateless (state is in etcd).
 
 Key fact: All communication in the cluster flows through the apiserver.
-          etcd speaks to NO other component. The scheduler speaks to
-          NO other component except the apiserver.
+          etcd speaks to NO other component. Neither kube-scheduler nor
+          kube-controller-manager speak to any other component except
+          the apiserver — confirmed by their Command flags, which only
+          reference a kubeconfig pointing at the apiserver, never etcd.
 ```
 
 ### etcd
@@ -162,6 +168,13 @@ Process:
      c. Bind: write spec.nodeName to the Pod object in etcd (via apiserver)
   3. Kubelet on that node notices the Pod is assigned to it → starts it
 
+Scaling:  NOT horizontal like apiserver. Multiple replicas can run for HA,
+          but only one is active (the leader) at a time — coordinated via
+          a Lease object in kube-system, using --leader-elect=true. Standby
+          replicas do nothing until the leader's lease expires. This
+          cluster runs with --leader-elect=false (single control-plane
+          node, no HA needed — confirmed in the Command flags).
+
 Key fact: The scheduler only DECIDES where a pod goes.
           It writes to the apiserver. The kubelet does the actual work.
 ```
@@ -188,6 +201,12 @@ Built-in controllers (subset):
   ServiceAccount controller creates default SA for new namespaces
   EndpointSlice controller  keeps EndpointSlices in sync with pods
 
+Scaling:  Same leader-election model as kube-scheduler — multiple replicas
+          can run for HA, but only one is active at a time, coordinated via
+          a Lease object in kube-system (--leader-elect=true in production).
+          This cluster runs with --leader-elect=false (confirmed in the
+          Command flags).
+
 Key fact: All controllers watch the apiserver and write back to the
           apiserver. No controller talks directly to etcd.
 ```
@@ -210,7 +229,7 @@ managed by the cloud provider.
 
 ---
 
-## Worker Node Components — Deep Dive
+### Worker Node Components — Deep Dive
 
 ### kubelet
 
@@ -223,7 +242,7 @@ Responsibilities:
   2. Watch apiserver for Pods assigned to this node
   3. Pull container images (via CRI)
   4. Start/stop containers (via CRI)
-  5. Run liveness/readiness probes
+  5. Run liveness/readiness/startup probes
   6. Mount volumes (ConfigMaps, Secrets, PVCs)
   7. Report node and pod status back to apiserver
   8. Enforce resource limits via cgroups
@@ -290,7 +309,7 @@ Supported runtimes in Kubernetes:
 
 ---
 
-## Static Pods — How Control Plane Bootstraps
+### Static Pods — How Control Plane Bootstraps
 
 ```
 Problem: The control plane components (apiserver, scheduler, etcd,
@@ -322,7 +341,7 @@ Static pods always have the node name as a suffix:
 
 ---
 
-## Add-on Components
+### Add-on Components
 
 ```
 CoreDNS
@@ -343,7 +362,7 @@ metrics-server
 
 ---
 
-## The Full Request Lifecycle — kubectl apply
+### The Full Request Lifecycle — kubectl apply
 
 What happens when you run `kubectl apply -f deployment.yaml`?
 
@@ -404,7 +423,26 @@ Step 14: kubectl poll returns: deployment.apps/nginx-deployment created
 
 ---
 
-## Observation Steps
+### Reference — Component Failure Impact
+
+| Component fails | Immediate impact | Cluster still works? |
+|-----------------|-----------------|----------------------|
+| kube-apiserver | No kubectl, no new deployments, no scaling | Existing pods keep running |
+| etcd | kube-apiserver cannot read/write — all API calls fail | Existing pods keep running |
+| kube-scheduler | New pods stay Pending — no new scheduling | Existing pods keep running |
+| kube-controller-manager | No new ReplicaSets, no rolling updates, no self-healing | Existing pods keep running |
+| kubelet (one node) | Pods on that node not restarted if they crash | Other nodes unaffected |
+| kube-proxy (one node) | Service routing broken on that node | Other nodes unaffected |
+| CoreDNS | DNS resolution fails across entire cluster | Pods still run, cannot resolve names |
+
+**Key insight:** The control plane being down does NOT kill running workloads.
+Pods that are already running continue until the node they are on fails.
+The cluster cannot CHANGE state without the control plane — it cannot scale,
+heal, or schedule new pods.
+
+---
+
+## Lab Step-by-Step Guide
 
 ### Step 1: View the control plane components as static pods
 
@@ -442,7 +480,8 @@ ls /etc/kubernetes/manifests/
 # etcd.yaml  kube-apiserver.yaml  kube-controller-manager.yaml  kube-scheduler.yaml
 
 # View the apiserver manifest (note the flags — auth, tls, etcd endpoint)
-cat /etc/kubernetes/manifests/kube-apiserver.yaml | grep -E "command|--etcd|--tls|--service"
+# (sudo is required — the manifest file is root-owned)
+sudo cat /etc/kubernetes/manifests/kube-apiserver.yaml | grep -E "command|--etcd|--tls|--service"
 
 exit
 ```
@@ -479,6 +518,12 @@ kubectl get events --field-selector reason=Scheduled | head -10
 # Shows: Successfully assigned default/xxx to 3node-m02
 ```
 
+> **Note:** Events have a short retention window (about 1 hour by default).
+> If nothing has been scheduled recently, this may return `No resources
+> found in default namespace.` — that's expected, not a problem. To see a
+> live event, create a quick test pod/deployment first (Step 8 does
+> exactly this).
+
 ---
 
 ### Step 5: View the controller-manager
@@ -503,10 +548,10 @@ kubectl describe pod kube-controller-manager-3node -n kube-system | grep -A30 "C
 minikube ssh -n 3node-m02 --profile 3node
 
 # kubelet runs as a systemd service (not a pod)
-systemctl status kubelet
+sudo systemctl status kubelet
 
 # View kubelet configuration
-cat /var/lib/kubelet/config.yaml | grep -E "staticPod|resolverConfig|clusterDNS"
+sudo cat /var/lib/kubelet/config.yaml | grep -E "staticPod|resolverConfig|clusterDNS"
 # staticPodPath: /etc/kubernetes/manifests  ← reads static pods from here
 # clusterDNS: [10.96.0.10]                 ← CoreDNS IP injected into pods
 
@@ -562,29 +607,11 @@ minikube ssh --profile 3node
 
 # Check what connects to etcd port 2379
 sudo ss -tnp | grep 2379
-# Only kube-apiserver PID should appear — no other process connects to etcd
+# Only kube-apiserver and etcd's own process should appear here —
+no other component's process name should ever show up
 
 exit
 ```
-
----
-
-## Component Failure Impact Reference
-
-| Component fails | Immediate impact | Cluster still works? |
-|-----------------|-----------------|----------------------|
-| kube-apiserver | No kubectl, no new deployments, no scaling | Existing pods keep running |
-| etcd | kube-apiserver cannot read/write — all API calls fail | Existing pods keep running |
-| kube-scheduler | New pods stay Pending — no new scheduling | Existing pods keep running |
-| kube-controller-manager | No new ReplicaSets, no rolling updates, no self-healing | Existing pods keep running |
-| kubelet (one node) | Pods on that node not restarted if they crash | Other nodes unaffected |
-| kube-proxy (one node) | Service routing broken on that node | Other nodes unaffected |
-| CoreDNS | DNS resolution fails across entire cluster | Pods still run, cannot resolve names |
-
-**Key insight:** The control plane being down does NOT kill running workloads.
-Pods that are already running continue until the node they are on fails.
-The cluster cannot CHANGE state without the control plane — it cannot scale,
-heal, or schedule new pods.
 
 ---
 
@@ -601,8 +628,313 @@ In this lab, you:
 - ✅ Confirmed kube-proxy is a DaemonSet writing iptables rules
 - ✅ Understood the failure impact of each component
 
-**Key Takeaway:** Kubernetes is a distributed state machine. The desired state
-lives in etcd. Every controller continuously reconciles current state toward
-desired state. The apiserver is the only gateway — making the entire cluster
-auditable and consistent. Nothing is magic: every pod start, every service
-update, every scale event is a chain of watch → compare → act loops.
+
+## Break-Fix
+
+> This lab has no manifests to break. These are diagnostic scenarios based on
+> symptoms you might observe in a real cluster — work out the answer, then
+> check yourself against the explanation.
+
+### Scenario-1 — `etcd-3node` is missing from `kubectl get pods -n kube-system`
+
+**Symptom:** `kubectl get pods -n kube-system` no longer lists `etcd-3node`, and every `kubectl` command now hangs or times out.
+
+**Diagnosis:** etcd is down, so kube-apiserver cannot read or write cluster state — the apiserver itself typically becomes unresponsive to most requests since almost every API call needs etcd. Existing running pods are unaffected (kubelet keeps them running independently), but nothing can be created, updated, scaled, or even listed reliably until etcd is restored.
+
+**What to check:** SSH into the control-plane node and confirm the static pod manifest at `/etc/kubernetes/manifests/etcd.yaml` is present and unmodified — kubelet restarts static pods automatically if the manifest is intact but the container crashed.
+
+### Scenario-2 — New Deployment stuck with all Pods in `Pending`
+
+**Symptom:** You create a Deployment. `kubectl get pods` shows all replicas stuck in `Pending`, forever, with no scheduling events.
+
+**Diagnosis:** kube-scheduler is not running, crashed, or not watching the apiserver. The apiserver and etcd are healthy (the Pod objects were created and written to etcd fine — that's why they show up in `kubectl get pods` at all), but nothing is assigning `spec.nodeName`.
+
+**What to check:** `kubectl get pods -n kube-system | grep scheduler` — if `kube-scheduler-3node` is missing or `CrashLoopBackOff`, that's the cause. Existing already-scheduled pods are unaffected.
+
+### Scenario-3 — Deleted Pod never comes back, even though a Deployment manages it
+
+**Symptom:** You delete a Pod that belongs to a Deployment. Normally a new one appears within seconds. This time, nothing happens — the replica count stays down.
+
+**Diagnosis:** kube-controller-manager is down, so the ReplicaSet controller's reconcile loop (watch → compare → act) isn't running. The Deployment and ReplicaSet objects still exist correctly in etcd — they're just not being reconciled.
+
+**What to check:** `kubectl get pods -n kube-system | grep controller-manager`. Also confirm this is the actual cause and not a scheduler issue — a missing scheduler still creates the Pod object (stuck Pending), while a missing controller-manager never even creates the replacement Pod object at all.
+
+### Scenario-4 — One node's Pods keep failing DNS-based Service calls, other nodes are fine
+
+**Symptom:** Pods on `3node-m02` can't resolve `myservice.default.svc.cluster.local` or reach other Services by ClusterIP. Pods on `3node-m03` work fine.
+
+**Diagnosis:** kube-proxy on `3node-m02` specifically is down or hasn't updated its iptables rules — since kube-proxy runs as a DaemonSet (one independent instance per node), a failure is node-scoped, not cluster-wide. CoreDNS itself is fine (that's why other nodes resolve correctly).
+
+**What to check:** `kubectl get pods -n kube-system -l k8s-app=kube-proxy -o wide` — confirm the pod on `3node-m02` is `Running`; if it is but rules are still stale, check its logs for iptables write errors.
+
+## Interview Prep
+
+**Q1: "Why does Kubernetes route everything through the apiserver instead of letting components talk to etcd directly?"**
+Centralizing all reads/writes through one component means every request goes through the same authentication, authorization, admission control, and validation pipeline — and etcd never has to implement any of that itself. It also means etcd can be swapped, backed up, or scaled without any other component needing to know it exists.
+
+**Q2: "If etcd loses quorum, are running workloads affected immediately?"**
+No — kubelets on each node keep running the containers they already know about, independent of etcd or the apiserver. What breaks immediately is anything that requires a *change*: no new pods, no scaling, no self-healing if a pod crashes and needs recreation via a controller. The cluster becomes read/execute-only for existing state until quorum is restored.
+
+**Q3: "Explain static pods and why the control plane specifically needs them."**
+Static pods are manifests the kubelet reads directly from a local directory (`/etc/kubernetes/manifests/`) and runs without ever talking to the apiserver. The control plane needs this because there's a bootstrapping problem — the apiserver itself is a pod, but pods normally require a working apiserver to be scheduled. Static pods break that circular dependency by letting kubelet start them independently.
+
+**Q4: "Walk through what happens between running `kubectl apply` and a container actually starting."**
+At a high level: kubectl authenticates and sends the object to the apiserver → apiserver runs authn/authz/admission/validation and persists it to etcd → the relevant controller (e.g. Deployment controller) notices the new object and creates the next object down the chain (ReplicaSet, then Pods) → kube-scheduler assigns a node to each unscheduled Pod → kubelet on that node pulls the image via the container runtime and starts the container → kube-proxy updates networking rules once the pod has an IP.
+
+**Q5: "Why can kube-apiserver run multiple replicas, but etcd can't just be scaled the same way?"**
+kube-apiserver is stateless — all state lives in etcd, so any apiserver replica behind a load balancer can serve any request identically. etcd is the opposite: it holds the actual state and uses Raft consensus, where adding members changes the quorum math (majority requirement) and every additional write must be acknowledged by a majority of members — so etcd is scaled deliberately in odd numbers for fault tolerance, not simply "add more replicas" for throughput.
+
+## CKA/CKAD Certification Tips
+
+### Exam Objective Mapping
+
+| Demo concept / command | CKA objective | CKAD objective | Notes |
+|---|---|---|---|
+| Control plane components and their single responsibilities | Cluster Architecture, Installation & Configuration (25%) | — | Core CKA topic; CKAD does not test control plane internals |
+| etcd role, Raft consensus, quorum math | Cluster Architecture, Installation & Configuration (25%) | — | CKA may ask "how many etcd members tolerate N failures" |
+| Static pods — location, naming, bootstrap purpose | Cluster Architecture, Installation & Configuration (25%) | — | Classic CKA task: diagnose a broken static pod manifest on a node |
+| kube-scheduler filtering/scoring process | Workloads & Scheduling (15%) | Application Deployment (20%) | Both exams expect you to reason about why a pod stays Pending |
+| kubelet responsibilities, CRI | Cluster Architecture, Installation & Configuration (25%) | — | CKA-heavy; understanding the CRI boundary matters for runtime troubleshooting |
+| kube-proxy modes (iptables/IPVS/nftables) | Services & Networking (20%) | Services and Networking (20%) | Genuinely dual-relevant — both exams touch Service networking behavior |
+| Full `kubectl apply` request lifecycle | Cluster Architecture, Installation & Configuration (25%) | Application Deployment (20%) | Useful mental model for diagnosing "where in the chain did this stall" on either exam |
+| Component-down failure impact (Reference table) | Troubleshooting (30%) | Application Observability and Maintenance (15%) | Directly tests the ability to localize a fault to one component from symptoms alone |
+
+### Common Exam Traps
+
+| Scenario | What the task actually requires | Common wrong approach |
+|---|---|---|
+| Task shows a cluster where new pods stay `Pending` indefinitely with no scheduling events, and asks you to identify the likely cause | Recognize this points specifically at kube-scheduler being down or unhealthy — not the apiserver or etcd, since the Pod object clearly exists (visible via `kubectl get pods`) | Investigating etcd/apiserver health first, when the fact that `kubectl get pods` works at all already rules those out |
+| Task asks you to fix a static pod that won't start on a control-plane node | Edit or replace the manifest file in `/etc/kubernetes/manifests/` directly on that node — kubelet picks up filesystem changes automatically, no `kubectl apply` involved | Trying to `kubectl edit` or `kubectl apply` a static pod's mirror pod — mirror pods are read-only reflections and cannot be edited via the API |
+| Task states etcd has 3 members and asks how many member failures the cluster can tolerate before losing quorum | 1 — quorum requires a majority (2 of 3); losing 2 members loses quorum | Assuming "3 members" means "tolerates 3 failures," or miscalculating majority incorrectly |
+| Task shows Service routing broken on exactly one node while every other node works fine, and asks for the root cause | Since kube-proxy runs as a per-node DaemonSet, a single-node routing failure points at that node's kube-proxy instance specifically, not CoreDNS or the Service object itself | Assuming a Service/DNS-level problem (which would be cluster-wide) when the symptom is explicitly node-scoped |
+
+## Key Takeaways
+
+| Concept | Detail |
+|---|---|
+| Two-tier architecture | Control plane (kube-apiserver, etcd, kube-scheduler, kube-controller-manager, cloud-controller-manager) and worker nodes (kubelet, kube-proxy, container runtime) |
+| Single point of truth | kube-apiserver is the ONLY component that reads from or writes to etcd; every other component watches the apiserver |
+| etcd consistency | Raft consensus — requires a majority (quorum) of members to acknowledge a write; 3 members tolerate 1 failure, 5 members tolerate 2 |
+| kube-scheduler's job | Decides WHICH node a pod runs on via filtering (eliminate impossible nodes) then scoring (rank remaining nodes) — it only decides, it doesn't execute |
+| kube-controller-manager | Runs all built-in controllers as goroutines in one process, each following watch → compare → act |
+| Static pods | Manifests kubelet reads directly from `/etc/kubernetes/manifests/`, started without the apiserver — solves the control plane's bootstrap chicken-and-egg problem |
+| kubelet is the executor | Runs directly as a systemd service (not a pod); does what the scheduler decided, never rebalances or overrides scheduling decisions |
+| CRI boundary | kubelet never creates containers directly — it calls the CRI API, and the runtime (containerd) does the actual work |
+| kube-proxy | Implements Service networking as kernel-level rules (iptables/IPVS/nftables) on each node — a DaemonSet, so failures are node-scoped |
+| Request lifecycle | `kubectl apply` → apiserver (authn → authz → admission → validation → etcd write) → Deployment controller → ReplicaSet controller → scheduler → kubelet → containerd → kube-proxy |
+| Control plane down ≠ workloads down | Existing running pods keep running without any control plane component — what breaks is the cluster's ability to CHANGE state (scale, heal, schedule new pods) |
+| Add-ons | CoreDNS (Deployment, cluster DNS) and metrics-server (Deployment, powers `kubectl top` and HPA) are not core control plane components but are near-universal additions |
+
+## Quick Commands Reference
+
+| Command | Purpose |
+|---|---|
+| `kubectl get pods -n kube-system` | List all control-plane static pods, CoreDNS, kube-proxy |
+| `kubectl get pods -n kube-system -o wide` | Same, with node placement visible |
+| `kubectl describe pod kube-apiserver-<node> -n kube-system` | View apiserver's actual startup flags |
+| `kubectl describe pod kube-scheduler-<node> -n kube-system` | View scheduler's startup flags |
+| `kubectl describe pod kube-controller-manager-<node> -n kube-system` | View controller-manager's startup flags |
+| `kubectl get events -w` | Watch controllers react to object changes in real time |
+| `kubectl get events --field-selector reason=Scheduled` | See only scheduling decisions |
+| `minikube ssh --profile 3node` | SSH into the control-plane node |
+| `minikube ssh -n <node> --profile 3node` | SSH into a specific worker node |
+| `ls /etc/kubernetes/manifests/` | List static pod manifests on a control-plane node |
+| `systemctl status kubelet` | Check kubelet's systemd service status on any node |
+| `cat /var/lib/kubelet/config.yaml` | View kubelet's own configuration |
+| `sudo ss -tnp \| grep 2379` | Confirm only kube-apiserver connects to etcd's port |
+| `kubectl get pods -n kube-system -l k8s-app=kube-proxy -o wide` | List kube-proxy DaemonSet pods, one per node |
+| `sudo iptables -t nat -L KUBE-SERVICES` | View kube-proxy's generated iptables rules on a node |
+
+## Troubleshooting
+
+| Symptom | Likely cause | Fix / check |
+|---|---|---|
+| `kubectl` commands hang or time out entirely | apiserver unreachable or etcd has lost quorum | Check `kube-apiserver-<node>` and `etcd-<node>` pod status; check etcd member count and quorum |
+| New pods stuck `Pending` forever, no scheduling events | kube-scheduler down or not watching apiserver | `kubectl get pods -n kube-system \| grep scheduler`; check its logs |
+| Deleted pod (managed by a Deployment) never replaced | kube-controller-manager down | `kubectl get pods -n kube-system \| grep controller-manager` |
+| Static pod won't start / keeps restarting | Manifest syntax error, or referenced volume/cert missing on that node | SSH to the node, inspect `/etc/kubernetes/manifests/<component>.yaml` directly |
+| `kubectl edit` on a static pod's mirror pod fails or has no effect | Mirror pods are read-only reflections — the real source is the manifest file | Edit the manifest file on the node's filesystem instead |
+| Service routing broken on one node only | That node's kube-proxy pod is down or has stale rules | `kubectl get pods -n kube-system -l k8s-app=kube-proxy -o wide`; check that specific pod's logs |
+| DNS resolution fails cluster-wide | CoreDNS pods down or crashlooping | `kubectl get pods -n kube-system -l k8s-app=kube-dns` (or your CoreDNS label) |
+
+## Appendix — Anki Cards
+
+**`01-cluster-architecture-anki.csv`:**
+
+```
+#deck:k8s-platform-labs::01-core-concepts::01-cluster-architecture
+#separator:Comma
+#columns:Front,Back,Tags
+"What's the single most important architectural rule about etcd access in Kubernetes?","kube-apiserver is the ONLY component that reads from or writes to etcd — every other component (scheduler, controllers, kubelets) only ever talks to the apiserver, never etcd directly.","demo01,architecture,etcd,apiserver"
+"List the five things kube-apiserver does to every incoming request, in order.","1) Authentication (who is this?) 2) Authorization (are they allowed?) 3) Admission control (mutate/reject) 4) Validation (is the spec valid?) 5) Persistence (write to etcd), then notify watchers.","demo01,apiserver,pipeline"
+"How many etcd members are needed to tolerate 2 node failures, and why?","5 members. Quorum requires a majority; with 5 members, quorum is 3 — losing 2 still leaves 3 available. The formula is floor(N/2) tolerated failures.","demo01,etcd,quorum,raft"
+"What are the two phases of kube-scheduler's decision process for each unscheduled pod?","Filtering (eliminate nodes that CANNOT run the pod — insufficient resources, untolerated taints, failed required affinity) then Scoring (rank the remaining nodes and pick the best one).","demo01,scheduler"
+"What does kube-scheduler actually DO once it picks a node for a pod — does it start the pod?","No — it only writes spec.nodeName to the Pod object via the apiserver. The kubelet on that node notices the assignment and does the actual work of starting the pod.","demo01,scheduler,kubelet"
+"Describe the generic controller pattern that every built-in controller in kube-controller-manager follows.","WATCH current state via the apiserver, COMPARE it to desired state (the spec), ACT to reconcile any difference — repeated continuously.","demo01,controller-manager,reconcile-loop"
+"Why do static pods exist — what problem do they solve?","They solve Kubernetes' bootstrap chicken-and-egg problem: control plane components like kube-apiserver are themselves pods, but pods normally need a working apiserver to be scheduled. Static pods are read directly from a local manifest directory by kubelet, with no apiserver involved, breaking the circular dependency.","demo01,static-pods"
+"Where does kubelet look for static pod manifests, and how can you recognize a static pod in kubectl get pods?","/etc/kubernetes/manifests/ on the node's filesystem. Static pods show up as mirror pods with the node name appended as a suffix, e.g. etcd-3node.","demo01,static-pods,kubelet"
+"Is kubelet itself a Kubernetes pod?","No — kubelet is the one Kubernetes component that runs directly as a systemd service on the node, not as a pod. It's what starts every other pod, including the static pods that make up the control plane.","demo01,kubelet"
+"What is the CRI, and why does it matter that kubelet uses it instead of running containers directly?","CRI (Container Runtime Interface) is the API kubelet calls to pull images and start/stop containers — it never talks to the container runtime directly. This decouples Kubernetes from any specific runtime; containerd, CRI-O, etc. can all implement the same CRI API.","demo01,kubelet,cri,containerd"
+"Name the three kube-proxy modes and which is newest.","iptables (default), IPVS (faster/more scalable using Linux IPVS), and nftables (new in Kubernetes 1.31, replaces iptables). All three implement the same job: translating Service ClusterIPs to real Pod IPs.","demo01,kube-proxy"
+"Does kube-proxy proxy application-layer traffic itself?","No — kube-proxy only writes kernel-level networking rules (iptables/IPVS/nftables). The kernel actually forwards the packets; kube-proxy never touches the traffic itself.","demo01,kube-proxy,networking"
+"In the full kubectl apply request lifecycle, what's the very first thing that happens after kube-apiserver persists the new Deployment to etcd?","The Deployment controller (running inside kube-controller-manager) notices the new Deployment via its watch on the apiserver, and creates a ReplicaSet with the desired replica count.","demo01,request-lifecycle,deployment-controller"
+"In the request lifecycle, at what point does the container actually start running?","Only after: apiserver persists the object, Deployment controller creates a ReplicaSet, ReplicaSet controller creates Pod objects (unscheduled), kube-scheduler assigns a node — THEN kubelet on that node pulls the image via containerd and starts the container.","demo01,request-lifecycle,kubelet"
+"If kube-controller-manager goes down, does an already-running Deployment's existing pods get deleted?","No — pods that are already running are managed by kubelet independently and keep running. What breaks is the cluster's ability to reconcile: no new ReplicaSets, no rolling updates, no self-healing if a pod crashes.","demo01,controller-manager,failure-impact"
+"What does CoreDNS do, and what breaks cluster-wide if it goes down versus what still works?","CoreDNS provides DNS resolution for all Services and Pods — every pod's /etc/resolv.conf points to it. If it goes down, name-based resolution fails everywhere, but pods that are already running keep running; only DNS lookups (not existing connections) are affected.","demo01,coredns,add-ons"
+```
+
+## Appendix — Quiz
+
+**`01-cluster-architecture-quiz.md`:**
+
+````markdown
+# Quiz — 01-core-concepts/01-cluster-architecture: Cluster Architecture
+
+> One correct answer per question unless stated otherwise.
+> Target: 80% or above before moving to next Demo.
+
+**Q1.** A cluster's `kubectl get nodes` and `kubectl get pods -n kube-system`
+commands both hang indefinitely with no response. What's the most likely
+root cause?
+- A) kube-scheduler is down
+- B) kube-controller-manager is down
+- C) kube-apiserver or etcd is down/unreachable
+- D) kube-proxy is down on the control-plane node
+
+<details>
+<summary>Answer</summary>
+
+**C** — kubectl itself can't get any response, which only happens when the apiserver (or the etcd it depends on) is unreachable.
+Trap: A and B would still let kubectl commands succeed — you'd just see stuck Pending pods or missing reconciliation, not a total hang. D affects Service routing, not kubectl's ability to talk to the API at all.
+
+</details>
+
+---
+
+**Q2.** You create a Deployment with 3 replicas. `kubectl get pods` shows 3
+Pod objects, all stuck in `Pending` with zero scheduling-related events.
+What's the most precise diagnosis?
+- A) kubelet is down on all nodes
+- B) kube-scheduler is down or not watching the apiserver
+- C) etcd has lost quorum
+- D) The container image doesn't exist
+
+<details>
+<summary>Answer</summary>
+
+**B** — the Pod objects clearly exist and are visible, which already rules out an etcd/apiserver problem; the missing piece is scheduling.
+Trap: C would likely prevent reliable listing of the Pods at all; A would show pods assigned to nodes but never actually starting, not stuck unscheduled; D would show an image-pull error after scheduling, not zero events pre-scheduling.
+
+</details>
+
+---
+
+**Q3.** A 5-member etcd cluster has just lost 3 members simultaneously.
+What happens?
+- A) The cluster continues operating normally since 2 members remain
+- B) Quorum is lost (a majority of 5 is 3) — no more writes are acknowledged, though existing pods keep running
+- C) etcd automatically promotes remaining members to compensate
+- D) Only read operations are affected; writes continue normally
+
+<details>
+<summary>Answer</summary>
+
+**B** — with only 2 of 5 members left, there's no majority, so quorum is lost.
+Trap: A and D wrongly assume 2 surviving members are enough; C invents automatic recovery behavior that doesn't happen — losing quorum requires manual/operational intervention.
+
+</details>
+
+---
+
+**Q4.** A static pod's manifest on a control-plane node needs to be
+corrected. What's the correct way to do it?
+- A) `kubectl edit pod kube-apiserver-<node> -n kube-system`
+- B) `kubectl apply -f` a corrected version of the pod spec
+- C) Edit the manifest file directly at `/etc/kubernetes/manifests/` on that node — kubelet picks up the change automatically
+- D) Delete the pod with `kubectl delete pod` and let it recreate itself with the corrected spec
+
+<details>
+<summary>Answer</summary>
+
+**C** — static pods are sourced from the filesystem, not the API.
+Trap: A and D both treat the static pod's mirror pod as a normal apiserver-managed object — mirror pods are read-only reflections; the real source of truth is the file on disk.
+
+</details>
+
+---
+
+**Q5.** Pods on `3node-m02` can't reach a ClusterIP Service. Identical pods
+on `3node-m03` reach it fine. Which component is the most likely cause, and
+why is the failure node-scoped rather than cluster-wide?
+- A) CoreDNS — but this would typically be cluster-wide, not node-scoped
+- B) kube-proxy on `3node-m02` — it runs as a DaemonSet with one independent instance per node
+- C) The Service object itself is misconfigured
+- D) kube-scheduler placed the pods incorrectly
+
+<details>
+<summary>Answer</summary>
+
+**B** — a per-node DaemonSet failure explains a single-node-scoped symptom.
+Trap: A and C both describe causes that would produce cluster-wide symptoms, which doesn't match this scenario; D confuses scheduling placement with runtime networking behavior.
+
+</details>
+
+---
+
+**Q6.** What's the correct order of events after `kubectl apply -f
+deployment.yaml` succeeds, before any container starts running?
+- A) apiserver writes to etcd → kubelet starts container → scheduler assigns node
+- B) apiserver writes to etcd → Deployment controller creates ReplicaSet → ReplicaSet controller creates Pods → scheduler assigns node → kubelet starts container
+- C) Deployment controller creates ReplicaSet → apiserver writes to etcd → scheduler assigns node
+- D) scheduler assigns node → apiserver writes to etcd → Deployment controller creates ReplicaSet
+
+<details>
+<summary>Answer</summary>
+
+**B** — this is the actual watch-driven chain, in order.
+Trap: A skips the entire controller chain, jumping straight from the etcd write to kubelet; C and D reorder steps that must happen in a fixed sequence — the apiserver write must occur before any controller can observe the object via its watch.
+
+</details>
+
+---
+
+**Q7.** kube-controller-manager crashes. A Deployment already has 3 healthy
+running pods. One of those pods is manually deleted. What happens?
+- A) A replacement pod is created within seconds, same as normal
+- B) No replacement pod is ever created until kube-controller-manager is restored
+- C) kubelet on another node automatically creates a replacement
+- D) The remaining 2 pods automatically absorb the missing pod's traffic and no replacement is needed
+
+<details>
+<summary>Answer</summary>
+
+**B** — the ReplicaSet controller, which enforces replica count, isn't running.
+Trap: A ignores that the reconciliation loop responsible for this is down; C misattributes ReplicaSet-controller responsibility to kubelet, which only manages pods already assigned to its own node; D confuses Service load-balancing with replica-count enforcement — unrelated mechanisms.
+
+</details>
+
+---
+
+**Q8.** Why does cloud-controller-manager not run in a minikube cluster,
+and what would it do if it did?
+- A) It's deprecated and no longer used in any Kubernetes cluster
+- B) It only runs on cloud-managed clusters (EKS/GKE/AKS) to integrate with cloud-provider APIs — e.g. provisioning LoadBalancers, managing cloud VM node lifecycle, configuring VPC routes
+- C) It's merged into kube-controller-manager in all clusters now
+- D) minikube disables it purely for performance; it's fully functional if manually enabled
+
+<details>
+<summary>Answer</summary>
+
+**B** — it exists specifically to bridge Kubernetes to a cloud provider's own APIs.
+Trap: A is factually wrong — it's actively used on all major managed cloud clusters; C invents a merge that hasn't happened; D wrongly implies it's just switched off for speed, when the real reason is there's no cloud API for it to integrate with locally.
+
+</details>
+
+Score guide:
+| Score | Action |
+|---|---|
+| 8/8 | Import Anki cards, move to next Demo |
+| 7/8 | Review the wrong answer, then proceed |
+| 6/8 | Re-read the relevant section, retry those questions |
+| Below 6/8 | Re-read the full demo and redo the walkthrough before proceeding |
+````
