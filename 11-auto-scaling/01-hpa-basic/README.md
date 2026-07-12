@@ -2642,7 +2642,7 @@ kubectl describe pod -n kube-system -l k8s-app=metrics-server
 # Quiz — 11-auto-scaling/01-hpa-basic: HPA and the Kubernetes Horizontal Scaling Model
 
 > One correct answer per question unless stated otherwise.
-> Target: 17/20 or above before moving to 02-hpa-advanced.
+> Target: 17/20 or above before moving to next demo.
 
 **Q1. What does cAdvisor read to collect container CPU and memory usage?**
 

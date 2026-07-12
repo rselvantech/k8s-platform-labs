@@ -1,7 +1,7 @@
 # Quiz — 11-auto-scaling/02-hpa-advanced: HPA Advanced — ContainerResource, Percent Behavior, and the Custom/External Metrics Pipeline
 
 > One correct answer per question unless stated otherwise.
-> Target: 7/8 or above before moving to 03-vpa-fundamentals.
+> Target: 7/8 or above before moving to next demo.
 
 **Q1. You have a 2-container pod (`app` + `sidecar`) and apply an HPA with `type: Resource` targeting CPU. The `sidecar` starts consuming significant CPU. What is the risk?**
 
