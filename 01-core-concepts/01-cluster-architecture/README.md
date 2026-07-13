@@ -142,6 +142,11 @@ Fault tolerance: Requires quorum (majority) to operate.
   5 members → tolerates 2 failures
   Formula: can tolerate floor(N/2) failures
 
+Scaling:  Fixed-size cluster (odd member count, 3 or 5) — does not scale by
+          adding arbitrary replicas. More capacity comes from faster
+          disks/more RAM per member, not more members past what quorum
+          math tolerates.
+
 Key fact: etcd stores data as key/value pairs under /registry/.
   kubectl get pod nginx -o yaml
   → apiserver reads /registry/pods/default/nginx from etcd
@@ -225,6 +230,15 @@ Handles:
 
 In minikube: Not used. In EKS/GKE/AKS: runs as a separate process
 managed by the cloud provider.
+
+Scaling:  Same leader-election model as kube-controller-manager when run
+          in HA clouds — single active instance.
+
+Key fact: Only exists when the cluster runs on a supported cloud provider.
+          minikube and bare-metal clusters have no cloud-controller-manager
+          process at all — this is why it's absent from your `kubectl get
+          pods -n kube-system` output.
+
 ```
 
 ---
@@ -256,6 +270,9 @@ Static Pods: kubelet also reads pod manifests from
   These pods are started by kubelet WITHOUT the apiserver.
   This is how control plane components bootstrap themselves.
 
+Scaling:  Exactly one instance per node, always. Not horizontally scaled —
+          more capacity means more nodes, not more kubelets per node.
+
 Key fact: kubelet is the executor. It does what the scheduler decided.
           It never modifies the scheduler's decision or rebalances pods
           across nodes.
@@ -277,6 +294,9 @@ Example: Service nginx has ClusterIP 10.96.100.10, port 80
   Three pods behind it: 10.244.0.5, 10.244.1.8, 10.244.2.3
   kube-proxy writes iptables rules:
     DNAT 10.96.100.10:80 → randomly select one of the three pod IPs
+
+Scaling:  Runs as one DaemonSet pod per node — scales automatically with
+          node count, not independently configurable.
 
 Key fact: kube-proxy does NOT proxy traffic at the application layer.
           It only writes kernel networking rules. The kernel forwards
@@ -305,6 +325,13 @@ Supported runtimes in Kubernetes:
   containerd  ← default in modern clusters (minikube, EKS, GKE)
   CRI-O       ← used in OpenShift
   Docker      ← removed in Kubernetes 1.24 (use containerd instead)
+
+Scaling:  One instance per node, same as kubelet — not independently
+          scaled.
+
+Key fact: containerd predates Kubernetes' CRI standard. It was donated to
+          CNCF and later adapted to implement CRI so kubelet could use it
+          as a pluggable, swappable runtime.
 ```
 
 ---
@@ -708,6 +735,15 @@ kube-apiserver is stateless — all state lives in etcd, so any apiserver replic
 | Task states etcd has 3 members and asks how many member failures the cluster can tolerate before losing quorum | 1 — quorum requires a majority (2 of 3); losing 2 members loses quorum | Assuming "3 members" means "tolerates 3 failures," or miscalculating majority incorrectly |
 | Task shows Service routing broken on exactly one node while every other node works fine, and asks for the root cause | Since kube-proxy runs as a per-node DaemonSet, a single-node routing failure points at that node's kube-proxy instance specifically, not CoreDNS or the Service object itself | Assuming a Service/DNS-level problem (which would be cluster-wide) when the symptom is explicitly node-scoped |
 
+### Exam Task
+
+Not applicable — this demo is theory/observation-only and creates no
+Kubernetes objects with a kubectl imperative equivalent (no Deployment,
+Pod, Job, ConfigMap, etc. is ever applied — Step 8's test-arch Deployment
+is created and deleted purely to observe controller events, not as a
+persistent lab artifact). Per the master's object-less exception, no
+`Exam Task — Write it from scratch` is fabricated here.
+
 ## Key Takeaways
 
 | Concept | Detail |
@@ -745,6 +781,12 @@ kube-apiserver is stateless — all state lives in etcd, so any apiserver replic
 | `kubectl get pods -n kube-system -l k8s-app=kube-proxy -o wide` | List kube-proxy DaemonSet pods, one per node |
 | `sudo iptables -t nat -L KUBE-SERVICES` | View kube-proxy's generated iptables rules on a node |
 
+> **Note:** This demo creates no Kubernetes objects with a `kubectl`
+> imperative equivalent, so the `--dry-run=client -o yaml` and
+> `Imperative Quick-Create Commands` subsections are not applicable here
+> (per the master's object-less exception) — they are omitted
+> deliberately, not missing.
+
 ## Troubleshooting
 
 | Symptom | Likely cause | Fix / check |
@@ -765,22 +807,22 @@ kube-apiserver is stateless — all state lives in etcd, so any apiserver replic
 #deck:k8s-platform-labs::01-core-concepts::01-cluster-architecture
 #separator:Comma
 #columns:Front,Back,Tags
-"What's the single most important architectural rule about etcd access in Kubernetes?","kube-apiserver is the ONLY component that reads from or writes to etcd — every other component (scheduler, controllers, kubelets) only ever talks to the apiserver, never etcd directly.","demo01,architecture,etcd,apiserver"
-"List the five things kube-apiserver does to every incoming request, in order.","1) Authentication (who is this?) 2) Authorization (are they allowed?) 3) Admission control (mutate/reject) 4) Validation (is the spec valid?) 5) Persistence (write to etcd), then notify watchers.","demo01,apiserver,pipeline"
+"What's the single most important architectural rule about etcd access in Kubernetes?","kube-apiserver is the ONLY component that reads from or writes to etcd — every other component (scheduler, controllers, kubelets) only ever talks to the apiserver, never etcd directly.","demo01,architecture,etcd,apiserver,cka-cluster-architecture"
+"List the five things kube-apiserver does to every incoming request, in order.","1) Authentication (who is this?) 2) Authorization (are they allowed?) 3) Admission control (mutate/reject) 4) Validation (is the spec valid?) 5) Persistence (write to etcd), then notify watchers.","demo01,etcd,quorum,raft,cka-cluster-architecture"
 "How many etcd members are needed to tolerate 2 node failures, and why?","5 members. Quorum requires a majority; with 5 members, quorum is 3 — losing 2 still leaves 3 available. The formula is floor(N/2) tolerated failures.","demo01,etcd,quorum,raft"
-"What are the two phases of kube-scheduler's decision process for each unscheduled pod?","Filtering (eliminate nodes that CANNOT run the pod — insufficient resources, untolerated taints, failed required affinity) then Scoring (rank the remaining nodes and pick the best one).","demo01,scheduler"
-"What does kube-scheduler actually DO once it picks a node for a pod — does it start the pod?","No — it only writes spec.nodeName to the Pod object via the apiserver. The kubelet on that node notices the assignment and does the actual work of starting the pod.","demo01,scheduler,kubelet"
-"Describe the generic controller pattern that every built-in controller in kube-controller-manager follows.","WATCH current state via the apiserver, COMPARE it to desired state (the spec), ACT to reconcile any difference — repeated continuously.","demo01,controller-manager,reconcile-loop"
-"Why do static pods exist — what problem do they solve?","They solve Kubernetes' bootstrap chicken-and-egg problem: control plane components like kube-apiserver are themselves pods, but pods normally need a working apiserver to be scheduled. Static pods are read directly from a local manifest directory by kubelet, with no apiserver involved, breaking the circular dependency.","demo01,static-pods"
-"Where does kubelet look for static pod manifests, and how can you recognize a static pod in kubectl get pods?","/etc/kubernetes/manifests/ on the node's filesystem. Static pods show up as mirror pods with the node name appended as a suffix, e.g. etcd-3node.","demo01,static-pods,kubelet"
-"Is kubelet itself a Kubernetes pod?","No — kubelet is the one Kubernetes component that runs directly as a systemd service on the node, not as a pod. It's what starts every other pod, including the static pods that make up the control plane.","demo01,kubelet"
-"What is the CRI, and why does it matter that kubelet uses it instead of running containers directly?","CRI (Container Runtime Interface) is the API kubelet calls to pull images and start/stop containers — it never talks to the container runtime directly. This decouples Kubernetes from any specific runtime; containerd, CRI-O, etc. can all implement the same CRI API.","demo01,kubelet,cri,containerd"
-"Name the three kube-proxy modes and which is newest.","iptables (default), IPVS (faster/more scalable using Linux IPVS), and nftables (new in Kubernetes 1.31, replaces iptables). All three implement the same job: translating Service ClusterIPs to real Pod IPs.","demo01,kube-proxy"
-"Does kube-proxy proxy application-layer traffic itself?","No — kube-proxy only writes kernel-level networking rules (iptables/IPVS/nftables). The kernel actually forwards the packets; kube-proxy never touches the traffic itself.","demo01,kube-proxy,networking"
-"In the full kubectl apply request lifecycle, what's the very first thing that happens after kube-apiserver persists the new Deployment to etcd?","The Deployment controller (running inside kube-controller-manager) notices the new Deployment via its watch on the apiserver, and creates a ReplicaSet with the desired replica count.","demo01,request-lifecycle,deployment-controller"
-"In the request lifecycle, at what point does the container actually start running?","Only after: apiserver persists the object, Deployment controller creates a ReplicaSet, ReplicaSet controller creates Pod objects (unscheduled), kube-scheduler assigns a node — THEN kubelet on that node pulls the image via containerd and starts the container.","demo01,request-lifecycle,kubelet"
-"If kube-controller-manager goes down, does an already-running Deployment's existing pods get deleted?","No — pods that are already running are managed by kubelet independently and keep running. What breaks is the cluster's ability to reconcile: no new ReplicaSets, no rolling updates, no self-healing if a pod crashes.","demo01,controller-manager,failure-impact"
-"What does CoreDNS do, and what breaks cluster-wide if it goes down versus what still works?","CoreDNS provides DNS resolution for all Services and Pods — every pod's /etc/resolv.conf points to it. If it goes down, name-based resolution fails everywhere, but pods that are already running keep running; only DNS lookups (not existing connections) are affected.","demo01,coredns,add-ons"
+"What are the two phases of kube-scheduler's decision process for each unscheduled pod?","Filtering (eliminate nodes that CANNOT run the pod — insufficient resources, untolerated taints, failed required affinity) then Scoring (rank the remaining nodes and pick the best one).","demo01,scheduler,cka-workloads-scheduling,ckad-application-deployment"
+"What does kube-scheduler actually DO once it picks a node for a pod — does it start the pod?","No — it only writes spec.nodeName to the Pod object via the apiserver. The kubelet on that node notices the assignment and does the actual work of starting the pod.","demo01,scheduler,kubelet,cka-workloads-scheduling,ckad-application-deployment"
+"Describe the generic controller pattern that every built-in controller in kube-controller-manager follows.","WATCH current state via the apiserver, COMPARE it to desired state (the spec), ACT to reconcile any difference — repeated continuously.","demo01,controller-manager,reconcile-loop,cka-cluster-architecture"
+"Why do static pods exist — what problem do they solve?","They solve Kubernetes' bootstrap chicken-and-egg problem: control plane components like kube-apiserver are themselves pods, but pods normally need a working apiserver to be scheduled. Static pods are read directly from a local manifest directory by kubelet, with no apiserver involved, breaking the circular dependency.","demo01,static-pods,cka-cluster-architecture"
+"Where does kubelet look for static pod manifests, and how can you recognize a static pod in kubectl get pods?","/etc/kubernetes/manifests/ on the node's filesystem. Static pods show up as mirror pods with the node name appended as a suffix, e.g. etcd-3node.","demo01,static-pods,kubelet,cka-cluster-architecture"
+"Is kubelet itself a Kubernetes pod?","No — kubelet is the one Kubernetes component that runs directly as a systemd service on the node, not as a pod. It's what starts every other pod, including the static pods that make up the control plane.","demo01,kubelet,cka-cluster-architecture"
+"What is the CRI, and why does it matter that kubelet uses it instead of running containers directly?","CRI (Container Runtime Interface) is the API kubelet calls to pull images and start/stop containers — it never talks to the container runtime directly. This decouples Kubernetes from any specific runtime; containerd, CRI-O, etc. can all implement the same CRI API.","demo01,kubelet,cri,containerd,cka-cluster-architecture"
+"Name the three kube-proxy modes and which is newest.","iptables (default), IPVS (faster/more scalable using Linux IPVS), and nftables (new in Kubernetes 1.31, replaces iptables). All three implement the same job: translating Service ClusterIPs to real Pod IPs.","demo01,kube-proxy,cka-services-networking,ckad-services-networking"
+"Does kube-proxy proxy application-layer traffic itself?","No — kube-proxy only writes kernel-level networking rules (iptables/IPVS/nftables). The kernel actually forwards the packets; kube-proxy never touches the traffic itself.","demo01,kube-proxy,networking,cka-services-networking,ckad-services-networking"
+"In the full kubectl apply request lifecycle, what's the very first thing that happens after kube-apiserver persists the new Deployment to etcd?","The Deployment controller (running inside kube-controller-manager) notices the new Deployment via its watch on the apiserver, and creates a ReplicaSet with the desired replica count.","demo01,request-lifecycle,deployment-controller,cka-cluster-architecture,ckad-application-deployment"
+"In the request lifecycle, at what point does the container actually start running?","Only after: apiserver persists the object, Deployment controller creates a ReplicaSet, ReplicaSet controller creates Pod objects (unscheduled), kube-scheduler assigns a node — THEN kubelet on that node pulls the image via containerd and starts the container.","demo01,request-lifecycle,kubelet,cka-cluster-architecture,ckad-application-deployment"
+"If kube-controller-manager goes down, does an already-running Deployment's existing pods get deleted?","No — pods that are already running are managed by kubelet independently and keep running. What breaks is the cluster's ability to reconcile: no new ReplicaSets, no rolling updates, no self-healing if a pod crashes.","demo01,controller-manager,failure-impact,cka-troubleshooting"
+"What does CoreDNS do, and what breaks cluster-wide if it goes down versus what still works?","CoreDNS provides DNS resolution for all Services and Pods — every pod's /etc/resolv.conf points to it. If it goes down, name-based resolution fails everywhere, but pods that are already running keep running; only DNS lookups (not existing connections) are affected.","demo01,coredns,add-ons,cka-cluster-architecture"
 ```
 
 ## Appendix — Quiz
