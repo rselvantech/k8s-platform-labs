@@ -1,0 +1,23 @@
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: worker-cron-scaler
+spec:
+  scaleTargetRef:
+    name: worker
+  minReplicaCount: 0              # 0 outside the scheduled window
+  maxReplicaCount: 5
+  cooldownPeriod: 30               # shortened for this demo (default: 300) -- see the
+                                   # Concepts note above; this still delays scale-to-zero
+                                   # by 30s after the window closes, not instantly
+  triggers:
+    - type: cron
+      metadata:
+        timezone: UTC
+        start: "*/2 * * * *"     # every 2 minutes (for demo -- replace with a real schedule)
+        end: "*/3 * * * *"       # 1-minute active window
+        desiredReplicas: "3"     # scale to 3 during the active window
+        # Production example:
+        # start: "0 9 * * 1-5"    # 9am Mon-Fri
+        # end: "0 18 * * 1-5"     # 6pm Mon-Fri
+        # desiredReplicas: "10"

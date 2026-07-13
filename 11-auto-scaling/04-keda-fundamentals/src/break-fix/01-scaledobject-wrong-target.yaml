@@ -1,0 +1,16 @@
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: worker-broken-target
+spec:
+  scaleTargetRef:
+    name: wroker          # BUG: typo -- "wroker" instead of "worker"
+  minReplicaCount: 0
+  maxReplicaCount: 5
+  triggers:
+    - type: cron
+      metadata:
+        timezone: UTC
+        start: "*/1 * * * *"
+        end: "*/2 * * * *"
+        desiredReplicas: "2"

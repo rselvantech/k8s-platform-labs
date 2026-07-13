@@ -1,0 +1,18 @@
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: worker-cooldown-surprise
+spec:
+  scaleTargetRef:
+    name: worker
+  minReplicaCount: 0
+  maxReplicaCount: 5
+  cooldownPeriod: 300              # the DEFAULT value -- not actually a bug in the YAML,
+                                   # the "bug" is the assumption in how it's operated (see below)
+  triggers:
+    - type: cron
+      metadata:
+        timezone: UTC
+        start: "*/2 * * * *"
+        end: "*/3 * * * *"
+        desiredReplicas: "2"
