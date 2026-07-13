@@ -1,4 +1,4 @@
-# Namespaces — Isolation, Scoping, and Multi-Tenancy
+# Demo: 01-core-concepts/02-namespaces — Namespaces
 
 ## Lab Overview
 
@@ -28,6 +28,13 @@ Understanding namespaces is foundational because they affect:
 - Minikube `3node` profile running
 - kubectl configured for `3node`
 
+```bash
+kubectl get nodes
+# 3node (control-plane)  Ready
+# 3node-m02              Ready
+# 3node-m03              Ready
+```
+
 ## Lab Objectives
 
 By the end of this lab, you will be able to:
@@ -42,13 +49,36 @@ By the end of this lab, you will be able to:
 ## Directory Structure
 
 ```
-02-namespaces/
-└── README.md    # This file — theory + hands-on steps
+01-core-concepts/02-namespaces/
+├── README.md                     # This file — theory + hands-on steps
+├── src/
+│   └── break-fix/                # Embedded-manifest convention — YAML lives inline in README
+├── 02-namespaces-anki.csv        # Anki cards
+└── 02-namespaces-quiz.md         # Quiz
 ```
 
 ---
 
-## Understanding Namespaces
+## Recall Check — 01-cluster-architecture
+
+Answer from memory before continuing — no peeking at Demo 01.
+
+1. A pod is stuck `Pending` with no scheduling events at all. Which control plane component would you check first, and why?
+2. You delete the entire control plane node. What happens to pods that were already running on the worker nodes, and why?
+3. Why can't kube-scheduler write `spec.nodeName` directly to etcd instead of going through the apiserver?
+
+<details>
+<summary>Answers</summary>
+
+1. kube-scheduler — it's the only component responsible for assigning `spec.nodeName`; no scheduling events means it may be down or the pod is unschedulable for a reason it hasn't logged yet.
+2. They keep running — kubelet doesn't need the apiserver to keep an already-started container alive. The cluster just can't change state (no rescheduling, scaling, or healing) until the control plane is back.
+3. apiserver is the only component that enforces authentication, authorization, admission control, and schema validation. Writing to etcd directly would bypass every one of those safeguards and remove the single audit trail for cluster state changes.
+
+</details>
+
+---
+
+## Concepts
 
 ### What Namespaces Provide
 
@@ -149,9 +179,37 @@ kubectl api-resources --namespaced=true   | head -20   # namespaced
 kubectl api-resources --namespaced=false  | head -20   # cluster-scoped
 ```
 
+### Namespace Naming Conventions (Production Guidance)
+
+```
+Environment-based:
+  development, staging, production
+
+Team-based:
+  team-platform, team-payments, team-data
+
+App-based:
+  app-frontend, app-backend, app-database
+
+Combined (recommended):
+  payments-production, payments-staging, data-development
+
+Rules:
+  - Use lowercase letters, numbers, hyphens only
+  - Max 63 characters
+  - Must start and end with alphanumeric character
+  - No underscores, no dots
+
+Avoid: using "default" for production workloads
+       One giant namespace per cluster (loses all namespace benefits)
+       Overly granular namespaces (one per microservice is too many)
+```
+
 ---
 
-## Hands-On Steps
+## Lab Step-by-Step Guide
+
+---
 
 ### Step 1: List existing namespaces and understand each
 
@@ -270,33 +328,36 @@ kubectl expose deployment nginx -n team-a --port=80 --name=nginx-svc
 ```
 
 ```bash
-# Verify DNS from inside a pod
-kubectl run dns-test -n team-b --image=busybox:1.36 --restart=Never -it --rm \
+# Verify DNS from inside a pod, from team-b
+kubectl run dns-test -n team-b --image=nicolaka/netshoot --restart=Never \
   -- sh -c "
     echo '=== Short name (resolves within team-b only) ==='
-    nslookup nginx-svc 2>&1 | tail -3
-
-    echo '=== Cross-namespace (works from team-b) ==='
-    nslookup nginx-svc.team-a 2>&1 | tail -3
-
-    echo '=== Full FQDN (always works) ==='
-    nslookup nginx-svc.team-a.svc.cluster.local 2>&1 | tail -3
+    dig +short +search nginx-svc
+    echo '=== Cross-namespace (works from team-b via search-domain expansion) ==='
+    dig +short +search nginx-svc.team-a
+    echo '=== Full FQDN (always works, no search expansion needed) ==='
+    dig +short nginx-svc.team-a.svc.cluster.local
   "
+
+# Give the pod a moment to finish, then read its output
+sleep 3
+kubectl logs dns-test -n team-b
+kubectl delete pod dns-test -n team-b
 ```
 
-**Expected — short name fails, cross-namespace and FQDN succeed:**
+**Expected output:**
 ```
 === Short name (resolves within team-b only) ===
-** server can't find nginx-svc: NXDOMAIN   ← no nginx-svc in team-b
-
-=== Cross-namespace (works from team-b) ===
-Name: nginx-svc.team-a.svc.cluster.local
-Address: 10.96.x.x   ← resolves via the namespace in the name
-
-=== Full FQDN (always works) ===
-Name: nginx-svc.team-a.svc.cluster.local
-Address: 10.96.x.x
+                                            ← empty: no nginx-svc in team-b, correctly fails
+=== Cross-namespace (works from team-b via search-domain expansion) ===
+10.101.129.194                             ← resolves: found via the svc.cluster.local search suffix
+=== Full FQDN (always works, no search expansion needed) ===
+10.101.129.194                             ← resolves: this is the record's real name, no search needed
 ```
+
+**Observation:** the short name fails because nothing named `nginx-svc` exists in `team-b` — DNS names are scoped to the namespace they're created in. The cross-namespace form succeeds because every pod's `/etc/resolv.conf` includes a `svc.cluster.local` entry in its search list, and `nginx-svc.team-a` with that suffix appended is exactly `nginx-svc.team-a.svc.cluster.local` — the service's real DNS name.
+
+> **Note on tooling:** this step uses `nicolaka/netshoot` with `dig +search` rather than `busybox`'s `nslookup`. Testing this specific scenario (a `resolv.conf` with more than one `search` entry) with `nslookup` on a musl-libc image like `busybox` can produce misleading empty results — musl has a documented limitation walking multi-entry DNS search lists, acknowledged by Kubernetes' own DNS maintainers. It's a test-tooling quirk, not a difference in actual Kubernetes DNS behavior, but it's worth knowing if you reach for `nslookup` in a busybox pod elsewhere in this repo and get an unexpected empty result.
 
 **Key rule:** When crossing namespace boundaries, always use at minimum
 `<service>.<namespace>`. Within the same namespace, the short name works.
@@ -405,36 +466,272 @@ kubectl describe namespace team-a | grep Conditions -A10
 
 ```bash
 kubectl delete namespace team-a production 2>/dev/null || true
-kubectl delete deployment nginx -n default 2>/dev/null || true
 ```
 
 ---
 
-## Namespace Naming Conventions (Production Guidance)
+## What You Learned
 
+In this lab, you:
+- ✅ Explained what namespaces provide: name scoping, RBAC boundary, quota enforcement
+- ✅ Explained what namespaces do NOT provide: network isolation (need NetworkPolicy for that)
+- ✅ Listed the four built-in namespaces and the purpose of each
+- ✅ Distinguished namespaced objects (Pod, Deployment, Service) from cluster-scoped (Node, PV, ClusterRole)
+- ✅ Created namespaces imperatively and declaratively with labels and annotations
+- ✅ Proved two Deployments named "nginx" can coexist in different namespaces
+- ✅ Demonstrated DNS cross-namespace behaviour — short names only work within the same namespace
+- ✅ Set a default namespace in your kubeconfig context
+- ✅ Understood that namespace deletion cascades to all objects inside it
+
+---
+
+## Break-Fix
+
+```bash
+cd src/break-fix/
 ```
-Environment-based:
-  development, staging, production
 
-Team-based:
-  team-platform, team-payments, team-data
+### Error-1
 
-App-based:
-  app-frontend, app-backend, app-database
-
-Combined (recommended):
-  payments-production, payments-staging, data-development
-
-Rules:
-  - Use lowercase letters, numbers, hyphens only
-  - Max 63 characters
-  - Must start and end with alphanumeric character
-  - No underscores, no dots
-
-Avoid: using "default" for production workloads
-       One giant namespace per cluster (loses all namespace benefits)
-       Overly granular namespaces (one per microservice is too many)
+**`01-namespace-wrong-apiversion.yaml`:**
+```yaml
+apiVersion: apps/v1
+kind: Namespace
+metadata:
+  name: staging
 ```
+
+```bash
+kubectl apply -f 01-namespace-wrong-apiversion.yaml
+```
+
+<details>
+<summary>Reveal answer — attempt diagnosis first</summary>
+
+**Cause:** `Namespace` only exists in the core `v1` API group, not `apps/v1` — that group is for Deployments, ReplicaSets, StatefulSets, and DaemonSets. The error is `error: unable to recognize "01-namespace-wrong-apiversion.yaml": no matches for kind "Namespace" in version "apps/v1"`.
+
+**Fix:** Change `apiVersion: apps/v1` to `apiVersion: v1` and reapply.
+
+**Cascade:** Since the namespace was never created, any later `kubectl apply -n staging` for another object fails with `namespaces "staging" not found` — a second, misleading-looking error that's actually a downstream consequence of this one.
+
+</details>
+
+**Cleanup:**
+```bash
+kubectl delete namespace staging 2>/dev/null || true
+kubectl get namespace staging
+# Error from server (NotFound) — confirms clean state
+```
+
+---
+
+### Error-2
+
+**`02-quota-zero-pods.yaml`:**
+```yaml
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: qa
+---
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: qa-quota
+  namespace: qa
+spec:
+  hard:
+    pods: "0"
+    requests.cpu: "2"
+```
+
+```bash
+kubectl apply -f 02-quota-zero-pods.yaml
+kubectl create deployment web --image=nginx:1.27 -n qa
+```
+
+<details>
+<summary>Reveal answer — attempt diagnosis first</summary>
+
+**Cause:** The quota applies cleanly (it's valid YAML), but `pods: "0"` means zero pods are allowed in this namespace at all. The Deployment object gets created, but its ReplicaSet controller fails to create any Pods: `Error creating: pods "web-xxx" is forbidden: exceeded quota: qa-quota, requested: pods=1, used: pods=0, limited: pods=0`.
+
+**Fix:** Edit the ResourceQuota's `pods` field to a realistic value (e.g. `"10"`) and reapply — existing Deployments will then create their pods automatically once the quota allows it.
+
+**Cascade:** `kubectl get deployment web -n qa` shows `0/1` ready indefinitely with no obvious top-level error — the actual failure only surfaces in `kubectl describe deployment web -n qa` (ReplicaSet events) or `kubectl get events -n qa`, not in the Deployment's own status line. This is a common "looks stuck, not obviously broken" trap.
+
+</details>
+
+**Cleanup:**
+```bash
+kubectl delete namespace qa 2>/dev/null || true
+kubectl get namespace qa
+# Error from server (NotFound) — confirms clean state
+```
+
+---
+
+### Error-3
+
+**`03-cross-namespace-dns.yaml`:**
+```yaml
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: backend
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: frontend
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api
+  namespace: backend
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: api }
+  template:
+    metadata:
+      labels: { app: api }
+    spec:
+      containers:
+      - name: api
+        image: nginx:1.27
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: api-svc
+  namespace: backend
+spec:
+  selector: { app: api }
+  ports:
+  - port: 80
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web
+  namespace: frontend
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: web }
+  template:
+    metadata:
+      labels: { app: web }
+    spec:
+      containers:
+      - name: web
+        image: nginx:1.27
+        env:
+        - name: API_HOST
+          value: "api-svc"          # short name — wrong namespace context
+```
+
+```bash
+kubectl apply -f 03-cross-namespace-dns.yaml
+kubectl exec -n frontend deploy/web -- getent hosts api-svc
+```
+
+<details>
+<summary>Reveal answer — attempt diagnosis first</summary>
+
+**Cause:** `API_HOST=api-svc` uses the short DNS form, which only resolves inside the `backend` namespace where `api-svc` actually lives. From inside `frontend`, `getent hosts api-svc` returns nothing — `api-svc` doesn't exist in `frontend`'s local resolution scope.
+
+**Fix:** Set `API_HOST` to `api-svc.backend` (or the full FQDN `api-svc.backend.svc.cluster.local`) and roll the Deployment (`kubectl rollout restart deployment web -n frontend`).
+
+**Cascade:** `kubectl get pods -n frontend` shows the pod as `Running` the entire time — the failure is invisible at the pod-status level. Only application-level symptoms (connection refused / DNS resolution errors in app logs, or a crash loop if the app treats a missing dependency as fatal) reveal the problem — a classic "healthy-looking but broken" scenario.
+
+</details>
+
+**Cleanup:**
+```bash
+kubectl delete namespace backend frontend 2>/dev/null || true
+kubectl get namespace backend frontend
+# Error from server (NotFound) — confirms clean state
+```
+
+---
+
+## Interview Prep
+
+**Q: A developer says "namespaces give us security isolation between teams." What's wrong with that statement?**
+A: Namespaces give organizational and RBAC isolation, not network or security isolation. By default, any pod can reach any other pod across namespace boundaries — you need a NetworkPolicy for actual network isolation, and RBAC alone doesn't stop lateral movement at the network layer.
+
+**Q: Why does `nginx-svc` resolve inside `team-a` but not from `team-b`?**
+A: Kubernetes DNS names are scoped to the namespace they're created in by default — the short form only resolves within the same namespace. Crossing a namespace boundary requires at least `<service>.<namespace>`, because that's literally how the DNS record is structured (`<svc>.<ns>.svc.cluster.local`).
+
+**Q: A namespace is stuck in `Terminating` for 20 minutes. Where do you look first?**
+A: Check for resources still inside it (`kubectl get all -n <ns>`) and check the namespace's own status conditions (`kubectl describe namespace <ns>`) for a finalizer that hasn't been cleared — a stuck finalizer is the most common cause, often from a custom resource or admission webhook that never responded.
+
+**Q: Why can two Deployments both be named "nginx" without conflict?**
+A: Object names are only required to be unique within a namespace, not cluster-wide — namespaces exist specifically to give teams that kind of naming freedom without collisions.
+
+**Q: When would you deliberately NOT split workloads into more namespaces?**
+A: When the operational overhead of managing more RBAC rules, quotas, and NetworkPolicies per namespace outweighs the isolation benefit — e.g., a small team's tightly coupled services that always deploy together often don't need per-service namespaces.
+
+---
+
+## CKA/CKAD Certification Tips
+
+### Exam Objective Mapping
+
+| Domain | Exam | Weight | Covered here |
+|---|---|---|---|
+| Cluster Architecture, Installation & Configuration | CKA | 25% | Namespace scope, namespaced vs cluster-scoped objects |
+| Services & Networking | CKA | 20% | Cross-namespace DNS resolution |
+| Application Environment, Configuration & Security | CKAD | 25% | Namespace-scoped resource creation and RBAC boundary |
+
+### Common Exam Traps
+
+| Trap | Why it trips people up |
+|---|---|
+| Forgetting `-n` and assuming `default` | Most exam tasks specify a namespace explicitly — missing `-n` silently creates the object in the wrong place, and it still "succeeds" |
+| Treating ResourceQuota failures as Deployment failures | The Deployment object itself shows no error — the quota rejection only appears in ReplicaSet events, easy to miss under time pressure |
+| Assuming short DNS names always work | Only true within the same namespace — exam tasks that reference a Service across namespaces require the `.namespace` suffix |
+| Forgetting that `kubectl delete namespace` cascades | Deleting a namespace to "clean up one resource" deletes everything in it — costly if done to the wrong namespace under time pressure |
+
+### Exam Task — Write it from scratch
+
+Create a namespace called `exam-ns`, then create a Deployment named `web` in it running `nginx:1.27` with 2 replicas, then expose it as a ClusterIP Service on port 80.
+
+Official docs: [Namespaces](https://kubernetes.io/docs/concepts/overview/working-with-objects/namespaces/), [kubectl expose](https://kubernetes.io/docs/reference/generated/kubectl/kubectl-commands#expose)
+
+<details>
+<summary>Reveal solution</summary>
+
+```bash
+kubectl create namespace exam-ns
+kubectl create deployment web --image=nginx:1.27 --replicas=2 -n exam-ns
+kubectl expose deployment web -n exam-ns --port=80
+```
+
+**Key fields to recall:** `metadata.namespace` (must match on every referencing object), `spec.replicas`, `spec.selector` (auto-generated by `expose`, must match the Deployment's pod labels).
+
+</details>
+
+---
+
+## Key Takeaways
+
+| Concept | Detail |
+|---|---|
+| Namespaces are organizational, not a security/network boundary | Any pod can reach any pod across namespaces by default — NetworkPolicy is required for actual isolation |
+| Names are unique per namespace, not cluster-wide | Two Deployments can both be named "nginx" if they live in different namespaces |
+| DNS scope follows namespace | Short service names resolve only within the same namespace; crossing namespaces requires `<service>.<namespace>` at minimum |
+| Four built-in namespaces exist by default | `default`, `kube-system`, `kube-public`, `kube-node-lease` — each with a distinct purpose, never repurpose `kube-system` for workloads |
+| Not everything is namespaced | Node, PersistentVolume, StorageClass, ClusterRole/ClusterRoleBinding, Namespace itself, and CRDs are cluster-scoped |
+| ResourceQuota scopes to one namespace | A quota object only limits usage within the namespace it's created in — it has no cluster-wide effect |
+| RBAC Roles are namespace-scoped by default | A Role/RoleBinding in one namespace grants no access elsewhere — ClusterRole/ClusterRoleBinding is required for cluster-wide permissions |
+| Namespace deletion cascades completely | Deleting a namespace deletes every object inside it — there is no selective delete |
+| Terminating namespaces are usually blocked by a finalizer | A stuck deletion almost always traces back to a resource or finalizer that hasn't cleared, not a generic "slow" delete |
+| `kubectl config set-context --current --namespace=<ns>` changes your default | This is a client-side convenience, not a cluster-side change — it doesn't affect what any other user's kubectl sees |
+| Quota failures surface at the ReplicaSet level, not the Deployment level | `kubectl get deployment` can look fine while pods silently fail to create — always check events when replicas don't match desired count |
+| Namespace naming should reflect environment or team, not be overly granular | One namespace per microservice is typically too fine-grained; one giant namespace per cluster loses all the benefits namespaces provide |
 
 ---
 
@@ -452,23 +749,126 @@ Avoid: using "default" for production workloads
 | `kubectl api-resources --namespaced=false` | List cluster-scoped resource types |
 | `kubectl delete ns <n>` | Delete namespace (and ALL its contents) |
 
+### Generating YAML skeletons with --dry-run
+
+`kubectl` can generate a valid YAML manifest for any object it can create imperatively,
+without actually creating the object. This is one of the most important exam techniques
+for CKA/CKAD — you rarely need to write YAML from scratch when you can generate a
+correct skeleton and edit it.
+
+**Syntax:**
+```bash
+kubectl <create-command> <args> --dry-run=client -o yaml > filename.yaml
+```
+
+**Applicable to this demo:**
+```bash
+kubectl create namespace team-a --dry-run=client -o yaml > namespace.yaml
+kubectl create deployment nginx --image=nginx:1.27 -n team-a --dry-run=client -o yaml > deploy.yaml
+kubectl expose deployment nginx -n team-a --port=80 --dry-run=client -o yaml > svc.yaml
+```
+
+**Not supported** — commands that read, describe, or operate on running objects:
+`kubectl get`, `describe`, `logs`, `exec`, `delete`, `apply`, `patch`, `label`
+
+**Exam workflow:**
+1. Generate the skeleton → edit what you need to change → `kubectl apply -f file.yaml`
+2. Or pipe directly: `kubectl create namespace team-a --dry-run=client -o yaml | kubectl apply -f -`
+
+### Imperative Quick-Create Commands
+
+Commands for creating this demo's key objects without YAML — useful under exam time pressure.
+Full `--dry-run=client -o yaml` skeleton generation is shown for each (see section above).
+
+| Object | Imperative command | Notes |
+|---|---|---|
+| Namespace | `kubectl create namespace NAME` | Or `kubectl create ns NAME` (alias) |
+| Deployment | `kubectl create deployment NAME --image=IMG -n NS` | Add `--replicas=N` to set replica count at creation |
+| Service (ClusterIP) | `kubectl expose deployment NAME --port=80 -n NS` | Selector auto-generated from the Deployment's pod labels |
+
 ---
 
-## What You Learned
+## Appendix — Anki Cards
 
-In this lab, you:
-- ✅ Explained what namespaces provide: name scoping, RBAC boundary, quota enforcement
-- ✅ Explained what namespaces do NOT provide: network isolation (need NetworkPolicy for that)
-- ✅ Listed the four built-in namespaces and the purpose of each
-- ✅ Distinguished namespaced objects (Pod, Deployment, Service) from cluster-scoped (Node, PV, ClusterRole)
-- ✅ Created namespaces imperatively and declaratively with labels and annotations
-- ✅ Proved two Deployments named "nginx" can coexist in different namespaces
-- ✅ Demonstrated DNS cross-namespace behaviour — short names only work within the same namespace
-- ✅ Set a default namespace in your kubeconfig context
-- ✅ Understood that namespace deletion cascades to all objects inside it
+```csv
+#deck:k8s-platform-labs::01-core-concepts::02-namespaces
+#separator:Comma
+#columns:Front,Back,Tags
+"Do namespaces provide network isolation by default?","No — any pod can reach any pod across namespaces by default; use NetworkPolicy for actual isolation","demo02,namespaces,cka-services-networking"
+"Are object names unique cluster-wide or per-namespace?","Per-namespace — two Deployments can both be named nginx if they're in different namespaces","demo02,namespaces,cka-cluster-architecture"
+"What are the four built-in Kubernetes namespaces?","default, kube-system, kube-public, kube-node-lease","demo02,namespaces,cka-cluster-architecture"
+"Name three cluster-scoped (non-namespaced) object types.","Node, PersistentVolume, ClusterRole/ClusterRoleBinding, Namespace itself, CustomResourceDefinition (any 3)","demo02,namespaces,cka-cluster-architecture"
+"What DNS suffix must you add to reach a Service from a different namespace?","At minimum <service>.<namespace>; the full FQDN is <service>.<namespace>.svc.cluster.local","demo02,dns,namespaces,cka-services-networking"
+"Are RBAC Roles namespace-scoped or cluster-scoped?","Namespace-scoped — a Role/RoleBinding in one namespace grants no access elsewhere; use ClusterRole/ClusterRoleBinding for cluster-wide permissions","demo02,rbac,namespaces,ckad-application-environment"
+"What happens to all objects inside a namespace when you delete it?","They are all deleted too — namespace deletion cascades completely, there is no selective delete","demo02,namespaces,cka-cluster-architecture"
+"A namespace is stuck in Terminating. What's the most likely cause?","A finalizer on one of its resources hasn't cleared — check kubectl describe namespace <ns> for Conditions","demo02,namespaces,troubleshooting,cka-troubleshooting"
+"Does kubectl config set-context --current --namespace=<ns> change anything cluster-side?","No — it's a client-side kubeconfig change only; it doesn't affect what other users' kubectl commands see","demo02,namespaces,kubeconfig,cka-cluster-architecture"
+"A ResourceQuota sets pods: \"0\" for a namespace. What happens when you create a Deployment there?","The Deployment object is created, but its ReplicaSet controller fails to create any Pods — the failure shows up in events, not the Deployment's own status line","demo02,resourcequota,namespaces,ckad-application-environment"
+"Which Kubernetes API group does the Namespace object belong to?","The core v1 API group — not apps/v1","demo02,namespaces,cka-cluster-architecture"
+"What flag shows resources across every namespace at once?","-A or --all-namespaces","demo02,namespaces,cka-cluster-architecture"
+```
 
-**Key Takeaway:** Namespaces are the organisational and access control boundary
-for Kubernetes resources. They are NOT network firewalls — for that, you need
-NetworkPolicy. Every DNS name includes the namespace, which is why service
-names are portable within a namespace but require the namespace suffix when
-crossing boundaries.
+---
+
+## Appendix — Quiz
+
+````markdown
+1. A pod in namespace `team-b` tries to reach a Service in `team-a` using only the short name. What happens?
+   a) It resolves normally — DNS is cluster-wide
+   b) It fails with NXDOMAIN — short names only resolve within the same namespace
+   c) It resolves but the connection is blocked by RBAC
+   d) It works only if both namespaces have the same labels
+
+2. Which of these is a cluster-scoped (non-namespaced) object?
+   a) Deployment
+   b) ConfigMap
+   c) ClusterRole
+   d) Service
+
+3. A ResourceQuota sets `pods: "0"` in a namespace. You then create a Deployment there. What do you see?
+   a) The apply command itself fails immediately
+   b) The Deployment is created but no Pods are ever created, visible in ReplicaSet events
+   c) The Deployment silently redirects to the default namespace
+   d) Kubernetes automatically raises the quota
+
+4. What is required to reach a Service from a different namespace?
+   a) Nothing extra — namespaces don't affect DNS
+   b) At minimum `<service>.<namespace>`
+   c) A NetworkPolicy explicitly allowing it
+   d) The full pod IP address
+
+5. What happens when you delete a namespace that contains 10 Pods and 3 Deployments?
+   a) Only the namespace object is removed; the Pods and Deployments remain
+   b) You're prompted to delete each object individually first
+   c) Everything inside the namespace is deleted too — deletion cascades
+   d) The Pods survive but the Deployments are deleted
+
+6. Why can two Deployments both be named "nginx" without any conflict?
+   a) Kubernetes automatically renames the second one
+   b) Object names are unique per-namespace, not cluster-wide
+   c) Deployment names aren't required to be unique at all
+   d) They must be in the same namespace to share a name
+
+7. A namespace has been `Terminating` for 20 minutes. What should you check first?
+   a) Restart the cluster
+   b) Check for a finalizer blocking deletion via `kubectl describe namespace`
+   c) Delete and recreate the namespace with the same name
+   d) This is always expected — no action needed
+
+8. Does `kubectl config set-context --current --namespace=<ns>` affect other users?
+   a) Yes — it changes the cluster's default namespace for everyone
+   b) No — it's a local kubeconfig change only
+   c) Yes, but only for users in the same RBAC group
+   d) No, but it does change the default for future namespaces created
+
+**Answers:** 1-b, 2-c, 3-b, 4-b, 5-c, 6-b, 7-b, 8-b
+
+### Score Guide
+
+| Score | Action |
+|---|---|
+| 8/8 | Import Anki cards, move to next demo |
+| 7/8 | Review the wrong answer, then proceed |
+| 5–6/8 | Re-read the relevant Concepts section, retry the quiz |
+| 4/8 or below | Re-read the full demo before proceeding |
+````
