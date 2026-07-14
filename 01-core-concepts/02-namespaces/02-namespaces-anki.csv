@@ -1,0 +1,15 @@
+#deck:k8s-platform-labs::01-core-concepts::02-namespaces
+#separator:Comma
+#columns:Front,Back,Tags
+"Do namespaces provide network isolation by default?","No — any pod can reach any pod across namespaces by default; use NetworkPolicy for actual isolation","demo02,namespaces,cka-services-networking"
+"Are object names unique cluster-wide or per-namespace?","Per-namespace — two Deployments can both be named nginx if they're in different namespaces","demo02,namespaces,cka-cluster-architecture"
+"What are the four built-in Kubernetes namespaces?","default, kube-system, kube-public, kube-node-lease","demo02,namespaces,cka-cluster-architecture"
+"Name three cluster-scoped (non-namespaced) object types.","Node, PersistentVolume, ClusterRole/ClusterRoleBinding, Namespace itself, CustomResourceDefinition (any 3)","demo02,namespaces,cka-cluster-architecture"
+"What DNS suffix must you add to reach a Service from a different namespace?","At minimum <service>.<namespace>; the full FQDN is <service>.<namespace>.svc.cluster.local","demo02,dns,namespaces,cka-services-networking"
+"Are RBAC Roles namespace-scoped or cluster-scoped?","Namespace-scoped — a Role/RoleBinding in one namespace grants no access elsewhere; use ClusterRole/ClusterRoleBinding for cluster-wide permissions","demo02,rbac,namespaces,ckad-application-environment-configuration-security"
+"What happens to all objects inside a namespace when you delete it?","They are all deleted too — namespace deletion cascades completely, there is no selective delete","demo02,namespaces,cka-cluster-architecture"
+"A namespace is stuck in Terminating. What's the most likely cause?","A finalizer on one of its resources hasn't cleared — check kubectl describe namespace <ns> for Conditions","demo02,namespaces,troubleshooting,cka-troubleshooting"
+"Does kubectl config set-context --current --namespace=<ns> change anything cluster-side?","No — it's a client-side kubeconfig change only; it doesn't affect what other users' kubectl commands see","demo02,namespaces,kubeconfig,cka-cluster-architecture"
+"A ResourceQuota sets pods: \"0\" for a namespace. What happens when you create a Deployment there?","The Deployment object is created, but its ReplicaSet controller fails to create any Pods — the failure shows up in events, not the Deployment's own status line","demo02,resourcequota,namespaces,ckad-application-environment-configuration-security"
+"Which Kubernetes API group does the Namespace object belong to?","The core v1 API group — not apps/v1","demo02,namespaces,cka-cluster-architecture"
+"What flag shows resources across every namespace at once?","-A or --all-namespaces","demo02,namespaces,cka-cluster-architecture"
