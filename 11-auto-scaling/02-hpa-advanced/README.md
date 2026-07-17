@@ -15,7 +15,7 @@ Two gaps stand out once you have used HPA on a single-container pod: what happen
 - The External Metrics API (`external.metrics.k8s.io`), the `External` metric type, and metrics adapter architecture
 - A decision framework for choosing among all five HPA metric types
 
-> **Scope note:** Steps 1–3 are hands-on (minikube `3node`, the same cluster as `01-hpa-basic`, metrics-server already enabled). Step 4 (Decision Framework) is a short theory step — no cluster commands. For deeper adapter architecture and E2E flows, see `## Kubernetes Scaling — API & Adapter Reference` below. Prometheus-based custom metrics (`Pods`/`Object` types with Prometheus Adapter) are covered hands-on in `11-auto-scaling/05-prometheus-adapter` (minikube `3node`). AWS-specific external metrics (SQS, ALB, CloudWatch) are covered in `aws-eks-demos`.
+> **Scope note:** Steps 1–3 are hands-on (minikube `3node`, the same cluster as `01-hpa-basic`, metrics-server already enabled). Step 4 (Decision Framework) is a short theory step — no cluster commands. For deeper adapter architecture and E2E flows, see `## Kubernetes Scaling — API & Adapter Reference` below. Prometheus-based custom metrics (`Pods`/`Object` types with Prometheus Adapter) are covered hands-on in later Prometheus Adapter demos in this series (minikube `3node`). AWS-specific external metrics (SQS, ALB, CloudWatch) are covered in `aws-eks-demos`.
 
 > **Verification status:** Steps 1–3 expected outputs and Break-Fix scenarios are written from documented HPA v2 behaviour, consistent with the facts already verified in `01-hpa-basic`. They have not yet been run against this lab's manifests on a live cluster — run through Steps 1–3 and Break-Fix on your `3node` cluster and report back anything that differs.
 
@@ -209,9 +209,9 @@ At **small** replica counts, `Pods` with a large `value` reaches desired faster 
 > **Hands-on covered elsewhere:**
 > - HPA usage, YAML, scaling behaviour → `01-hpa-basic`
 > - VPA installation and usage → `03-vpa-fundamentals`
-> - Prometheus Adapter hands-on → `05-prometheus-adapter`
+> - Prometheus Adapter hands-on → `06-prometheus-adapter-pods-type` / `07-prometheus-adapter-object-type`
 > - AWS-specific sources (SQS, ALB, CloudWatch), CA, KEDA SQS → not covered here. will be covered in `aws-eks-demos` series
-> - KEDA core (Kafka, Redis, Prometheus scalers) → `04-keda-adapter`
+> - KEDA core (Kafka, Redis, Prometheus scalers) → `04-keda-fundamentals` / `05-keda-redis-scaler`
 
 ---
 
@@ -1071,6 +1071,9 @@ spec:
           type: Utilization
           averageUtilization: 50    # scale when "app" CPU > 50% of its request
 ```
+⚡ **Imperative equivalent:** `kubectl autoscale deployment multi-container-app --min=1 --max=5 --cpu-percent=50`
+— note this only generates `type: Resource`; `ContainerResource` has no imperative
+equivalent and must always be written as YAML.
 
 ```bash
 kubectl apply -f 02-hpa-container-resource.yaml
@@ -1426,7 +1429,7 @@ kubectl delete -f 03-hpa-behavior-percent.yaml
 
 ---
 
-### Step 5 — Cleanup
+### Step 6 — Cleanup
 
 Steps 2 and 3 delete their own HPAs, but the Deployment and Service from Step 1 remain. Run this to return the cluster to its pre-lab state:
 
@@ -1467,7 +1470,7 @@ In this lab, you:
 - ✅ Explained the External Metrics API and metrics adapter architecture (Prometheus Adapter, CloudWatch adapter, KEDA)
 - ✅ Built a decision framework covering all five HPA metric types
 
-**Key Takeaway:** `Resource` and `ContainerResource` cover CPU/memory scaling with metrics-server alone — `ContainerResource` exists specifically to isolate one container's usage in a multi-container pod. `behavior` policies (`Pods` or `Percent`) are rate limiters on how fast the replica count moves toward the formula's desired value, never the scaling decision itself. Everything beyond CPU/memory — `Pods`, `Object`, `External` — requires a metrics adapter; Prometheus-based adapter hands-on is in `11-auto-scaling/05-prometheus-adapter`, AWS-specific sources are in `aws-eks-demos`.
+**Key Takeaway:** `Resource` and `ContainerResource` cover CPU/memory scaling with metrics-server alone — `ContainerResource` exists specifically to isolate one container's usage in a multi-container pod. `behavior` policies (`Pods` or `Percent`) are rate limiters on how fast the replica count moves toward the formula's desired value, never the scaling decision itself. Everything beyond CPU/memory — `Pods`, `Object`, `External` — requires a metrics adapter; Prometheus-based adapter hands-on is in Prometheus Adapter demos in this series, AWS-specific sources are in `aws-eks-demos`.
 
 ---
 
@@ -1761,6 +1764,56 @@ For `type: Resource`, every container in the pod must have `resources.requests.c
 | Task's 2-container pod has `resources.requests.cpu` on `app` but not on `sidecar`; the HPA metric shows `<unknown>` even though `kubectl top pod` shows `app`'s usage fine | Recognize that for `Resource`-type HPA, ANY container missing a CPU request makes the WHOLE pod's metric `<unknown>` — add the missing request to `sidecar`, not just double-check `app` | Assuming the metric is partially working because `app` clearly has a valid request, and looking elsewhere (metrics-server health, HPA YAML) for the fault |
 | Task asks to scale on a metric that isn't CPU or memory, and the first instinct is to reach for a metrics adapter as step one | Recognize `ContainerResource` (like `Resource`) is served by metrics-server alone — no adapter needed; adapters are only required for `Pods`/`Object`/`External` types | Assuming any non-`Resource` metric type automatically needs a custom metrics adapter, including `ContainerResource` |
 
+### Exam Task — Write it from scratch
+
+**Task:** From scratch (no copy-paste), write an HPA that:
+- Targets a Deployment named `web`, container named `api` (one of several containers in the pod)
+- Scales on that container's CPU only, target 60% utilization
+- Allows scale-up by at most 50% of current replicas per 30 seconds
+- Allows scale-down by at most 2 pods per 60 seconds
+- minReplicas: 2, maxReplicas: 8
+
+<details>
+<summary>Reference solution</summary>
+
+\```yaml
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: web-hpa
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: web
+  minReplicas: 2
+  maxReplicas: 8
+  metrics:
+    - type: ContainerResource
+      containerResource:
+        name: cpu
+        container: api
+        target:
+          type: Utilization
+          averageUtilization: 60
+  behavior:
+    scaleUp:
+      policies:
+        - type: Percent
+          value: 50
+          periodSeconds: 30
+    scaleDown:
+      policies:
+        - type: Pods
+          value: 2
+          periodSeconds: 60
+\```
+</details>
+
+Key fields to recall: `containerResource.container` (easy to forget vs plain `resource`),
+and that `behavior` policies are independent step-size caps per direction — mixing `Percent`
+(scale-up) and `Pods` (scale-down) in the same object is valid.
+
 ---
 
 ## Key Takeaways
@@ -1781,7 +1834,7 @@ For `type: Resource`, every container in the pod must have `resources.requests.c
 | External Metrics API | `external.metrics.k8s.io` — backs the `External` HPA type, for metrics with no associated Kubernetes object (e.g. SQS queue depth). Also requires an adapter. |
 | `Pods` vs `Object` | `Pods`: per-pod metric, averaged across pods (like `Resource`'s shape). `Object`: single metric from one named Kubernetes object via `describedObject`, compared directly — no per-pod averaging. |
 | metrics-server scope | metrics-server only serves `metrics.k8s.io` (used by `Resource`/`ContainerResource`). It has no role in Custom or External Metrics APIs. |
-| Adapter examples | Prometheus Adapter (generic, PromQL-based) — hands-on in `11-auto-scaling/05-prometheus-adapter`. KEDA and CloudWatch-based adapters (AWS-native) — hands-on in `aws-eks-demos`. CloudWatch Metrics Adapter is archived; prefer KEDA SQS scaler for new AWS setups. |
+| Adapter examples | Prometheus Adapter (generic, PromQL-based) — hands-on in Prometheus Adapter demos in this series. KEDA and CloudWatch-based adapters (AWS-native) — hands-on in `aws-eks-demos`. CloudWatch Metrics Adapter is archived; prefer KEDA SQS scaler for new AWS setups. |
 | Metric type decision order | Prefer `Resource`/`ContainerResource` (no extra components) for CPU/memory; reach for `Pods`/`Object`/`External` only when the signal is application-level or external. |
 | Scale-to-zero | `External`-type HPA cannot scale below `minReplicas: 1`. KEDA can scale to zero because it manages the scale-from-zero transition itself. |
 
@@ -1799,6 +1852,25 @@ For `type: Resource`, every container in the pod must have `resources.requests.c
 | `kubectl exec deploy/<name> -c <container> -- sh -c "..."` | Run a command in one specific container |
 | `kubectl describe hpa <name> \| grep -A8 "Behavior:"` | Inspect configured scale-up/scale-down policies |
 | `kubectl describe hpa <name> \| grep -A2 "Metrics:"` | Quick check of current vs target metric value |
+
+### Generating YAML skeletons with --dry-run
+
+```bash
+kubectl create deployment multi-container-app --image=nginx:1.27 --dry-run=client -o yaml > deploy.yaml
+kubectl autoscale deployment multi-container-app --min=1 --max=5 --cpu-percent=50 --dry-run=client -o yaml
+```
+
+**Not supported for this demo's key objects:** `ContainerResource`/`behavior` fields have
+no imperative flags — `kubectl autoscale` only generates a basic `type: Resource` HPA.
+Any HPA needing `ContainerResource` or `behavior` policies must be hand-written or
+hand-edited from the generated skeleton.
+
+### Imperative Quick-Create Commands
+
+| Object | Imperative command | Notes |
+|---|---|---|
+| Deployment | `kubectl create deployment NAME --image=IMG` | Multi-container pods still require manual YAML editing |
+| HPA (basic) | `kubectl autoscale deployment NAME --min=N --max=N --cpu-percent=N` | Only produces `type: Resource`; `ContainerResource`/`behavior` require YAML |
 
 ---
 
@@ -1865,7 +1937,7 @@ kubectl exec deploy/multi-container-app -c <container> -- which dd sh
 "What is the difference between the Pods and Object HPA metric types, given both use the Custom Metrics API?","Pods: per-pod custom metric averaged across all pods of the target — HPA divides total demand by per-pod target. Object: single metric read from one specific Kubernetes object (e.g. total Ingress request rate) compared directly against the target — no per-pod averaging.","02-hpa-advanced,custom-metrics-api,pods-object"
 "What is the External Metrics API, and give an example use case for the External HPA metric type.","external.metrics.k8s.io — an API group for metrics with NO associated Kubernetes object. Example: scaling a worker Deployment based on AWS SQS queue depth exposed via a metrics adapter.","02-hpa-advanced,external-metrics-api"
 "Does metrics-server have any role in serving the Custom Metrics API or External Metrics API?","No. metrics-server only serves metrics.k8s.io (used by Resource and ContainerResource). custom.metrics.k8s.io and external.metrics.k8s.io are served entirely by separately-installed metrics adapters.","02-hpa-advanced,custom-metrics-api,external-metrics-api,metrics-server"
-"Name two metrics adapter examples and where their hands-on setup is covered.","Prometheus Adapter (generic, PromQL-based) — hands-on in 11-auto-scaling/05-prometheus-adapter (minikube). KEDA and CloudWatch-based adapters (AWS-native) — hands-on in aws-eks-demos. Note: CloudWatch Metrics Adapter is archived; KEDA SQS scaler is the recommended replacement.","02-hpa-advanced,adapters,forward-reference"
+"Name two metrics adapter examples and where their hands-on setup is covered.","Prometheus Adapter (generic, PromQL-based) — hands-on in later Prometheus Adapter demos in this series (minikube). KEDA and CloudWatch-based adapters (AWS-native) — hands-on in aws-eks-demos. Note: CloudWatch Metrics Adapter is archived; KEDA SQS scaler is the recommended replacement.","02-hpa-advanced,adapters,forward-reference"
 "Does ContainerResource require a custom metrics adapter like Pods/Object/External do?","No. ContainerResource, like Resource, is served by metrics-server alone. Only Pods, Object, and External require a separate adapter.","02-hpa-advanced,containerresource,metrics-server"
 "Which HPA metric type should you reach for first when scaling on CPU or memory, and why?","Resource (or ContainerResource if one container's usage should be isolated) — both work with metrics-server alone, no extra components. Reach for Pods/Object/External only when the scaling signal is application-level or external.","02-hpa-advanced,decision-framework"
 "A multi-container pod has app (web server) and sidecar (log shipping spikes). You want HPA to scale on web server load only. Which type and which field identifies the target container?","ContainerResource, with containerResource.container: app (plus name: cpu and a target block).","02-hpa-advanced,containerresource,syntax"

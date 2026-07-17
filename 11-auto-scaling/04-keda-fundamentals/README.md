@@ -22,7 +22,16 @@ KEDA (Kubernetes Event-Driven Autoscaling) closes that gap. It does not replace 
 
 > **Scope note:** This demo covers KEDA's architecture and mechanics using the Cron scaler, which needs no additional infrastructure (no Redis, no Prometheus) — keeping the hands-on focused on KEDA itself rather than a second system's setup. The Redis scaler, full scale-to-zero/from-zero cycle against a real queue, and TriggerAuthentication hands-on are covered in `05-keda-redis-scaler`. KEDA's Prometheus scaler is covered as a short theory comparison later in this demo's Concepts — the hands-on Prometheus work belongs to the Prometheus Adapter demos (`06`, `07`), which teach a different (but related) bridging mechanism.
 >
-> **Verification status:** Steps 1–4's command outputs are real, captured output from a live `3node` minikube cluster (KEDA chart `2.20.0`) — not idealized/invented output. The worked numeric example for `activationThreshold` is an illustrative walkthrough, not captured from a live run. The `cooldownPeriod` worked example, however, **is** confirmed against real captured timestamps from this cluster — see the timestamped `ACTIVE` transition and event data in the `cooldownPeriod` subsection of Concepts., since they use round numbers chosen for clarity — the mechanism they describe is what Step 3's real output demonstrates directly. This revision's Concepts additions (the CPU/Memory trigger scale-to-zero limitation, the admission-webhook order-matters nuance, the `HPAScaleToZero` alpha feature gate) are sourced from current upstream KEDA and Kubernetes documentation, not captured from this cluster — they describe general KEDA/Kubernetes behavior, not something this specific lab exercises hands-on.
+> **Verification status:** Steps 1–4's command outputs are real, captured output from a live `3node`
+> minikube cluster (KEDA chart `2.20.0`) — not idealized/invented output. The worked numeric example for
+> `activationThreshold` is an illustrative walkthrough, not captured from a live run, since it uses round
+> numbers chosen for clarity. The `cooldownPeriod` worked example, however, **is** confirmed against real
+> captured timestamps from this cluster — see the timestamped `ACTIVE` transition and event data in the
+> `cooldownPeriod` subsection of Concepts, where the mechanism it describes is what Step 3's real output
+> demonstrates directly. This revision's Concepts additions (the CPU/Memory trigger scale-to-zero
+> limitation, the admission-webhook order-matters nuance, the `HPAScaleToZero` alpha feature gate) are
+> sourced from current upstream KEDA and Kubernetes documentation, not captured from this cluster — they
+> describe general KEDA/Kubernetes behavior, not something this specific lab exercises hands-on.
 
 ---
 
@@ -56,6 +65,7 @@ helm version --short
 4. ✅ Write a ScaledObject using the Cron scaler and observe a full outside-window → inside-window → outside-window cycle
 5. ✅ Diagnose a `scaleTargetRef` typo, an AmbiguousSelector conflict, and a `cooldownPeriod`-related scale-down delay from symptoms alone
 6. ✅ Explain why KEDA's Prometheus scaler and the Prometheus Adapter aren't really competing for the same job
+7. ✅ Explain which Kubernetes Metrics API KEDA implements (External) versus which it doesn't (Custom), and what that means practically for Pods/Object-type metrics
 
 ---
 
@@ -310,10 +320,12 @@ spec:
   pollingInterval: 30
   cooldownPeriod: 300
 
-  # Activation -- see "Activation vs. Scaling" below
-  # activationThreshold: 5
 
-  # Triggers -- see "Activation vs. Scaling" below
+
+  # Triggers -- see "Activation vs. Scaling" below. Note: activation fields
+  # (e.g. activationListLength, activationThreshold) live INSIDE each trigger's
+  # metadata block below, scaler-specific -- never as a top-level spec field
+  # like pollingInterval/cooldownPeriod are.
   triggers:
     - type: cron
       metadata:
@@ -325,12 +337,15 @@ spec:
 
 **Similar-term distinction — why `scaleTargetRef` here but `targetRef` in VPA:** this isn't inconsistency for its own sake. HPA's API (`autoscaling/v2`) defines `scaleTargetRef`, and KEDA's ScaledObject deliberately mirrors that exact field name, since KEDA describes itself as a drop-in extension of HPA — matching HPA's own naming reinforces that mental model. VPA uses `targetRef` (no `scale` prefix) precisely because VPA doesn't scale anything — it never touches replica count, only resource requests on the pods that already exist. The naming difference reflects a genuine difference in what each object does to its target, not an oversight.
 
-**Field-by-field explanation (simple fields — see the dedicated subsections below for `triggers`, `pollingInterval`, `cooldownPeriod`, and `activationThreshold`):**
+
+**Field-by-field explanation**
 
 | Field | Default | What it controls | Common mistake |
 |---|---|---|---|
 | `minReplicaCount` | 0 | Floor — can be 0 (unlike HPA's default minimum of 1) | Setting to 1 defeats the scale-to-zero benefit |
 | `maxReplicaCount` | 100 | Ceiling on replica count | Leaving at 100 may cause unbounded scale-out on unexpected traffic |
+
+**Note:** For other fieds such as `triggers`,`pollingInterval`, `cooldownPeriod`, and trigger's metadata, see the dedicated subsections below
 
 `minReplicaCount: 0` looks like it should translate directly into the managed HPA's own `minReplicas`, but by default it never does — the HPA API itself rejects `minReplicas: 0` at the schema-validation level, since HPA's own algorithm needs at least one running pod to observe a metric from in order to make any scaling decision at all. At literally 0 replicas there's no CPU/memory/request-rate data to read, nothing to compute against — HPA structurally cannot be the thing that decides "should we go from 0 to 1." KEDA's managed HPA always has `minReplicas: 1` (never 0) so it stays within HPA's legal range, and `keda-operator` handles the entire 0↔1 edge itself, completely outside HPA, by directly patching the Deployment. Step 3's captured output below makes this concrete: `keda-hpa-worker-cron-scaler` shows `MINPODS: 1 MAXPODS: 5 REPLICAS: 0` — an ordinary HPA could never show a replica count below its own `MINPODS` through its own control loop, so the only way that combination exists is that something outside the HPA's own reconciliation set it directly.
 
@@ -649,12 +664,11 @@ the next poll regardless.
 to be created outside an active window. This demo's manifest doesn't set it, so the default (no extra
 delay) applies throughout Step 3.
 
-**Also note:** 
-- if `minReplicaCount >= 1`, `ACTIVE` is always `True` and this entire scale-to-zero mechanism
-never engages.
-- `cooldownPeriod` only has anything to do when `minReplicaCount: 0` is set.
-- If the minimum replicas is >= 1, the scaler is always active and the activation value will be ignored. 
-- Everything in the cooldown/activation discussion only becomes observable at all because `minReplicaCount: 0` is set. If someone changes that to `1` later, `ACTIVE` will read True permanently, `cooldownPeriod's` `scale-to-zero` path never fires, and none of Error-3's scenario is even reachable anymore. 
+**One precondition this entire mechanism depends on** — covered in full in the next section,
+"What 'trigger active' means, generalized across scaler types": everything above only applies
+when `minReplicaCount: 0`. If `minReplicaCount >= 1`, `ACTIVE` is always `True` and none of this
+scale-to-zero/`cooldownPeriod` mechanism ever engages.
+
 ---
 
 ### What "trigger active" means, generalized across scaler types
@@ -1483,9 +1497,22 @@ By default it always shows `1`, never `0` — the HPA API rejects `minReplicas: 
 
 No — this is a real limitation, not a configuration mistake. Scale-to-zero depends on `keda-operator` being able to poll the trigger source even while the Deployment has zero pods, which is exactly what KEDA's External-metrics architecture (`keda-operator-metrics-apiserver`) enables. Plain CPU/memory Resource-type triggers don't go through that path at all — the managed HPA reads CPU/memory directly from the cluster's ordinary `metrics-server`, the same source `01-hpa-basic` used. With zero pods running, there's no CPU/memory data to read, so there's no signal available to decide when to scale back up. You can technically set `minReplicaCount: 0` on a CPU/memory-triggered ScaledObject, but it won't reliably reach zero, and if it did, it couldn't recover on its own. Scale-to-zero is specifically an External-metrics capability.
 
+**Q10. Where do a scaler's activation fields (e.g. `activationListLength`) actually live in a ScaledObject manifest — top-level `spec`, or somewhere else?**
+
+Inside the specific trigger's own `metadata` block, alongside that scaler's other fields (`listLength`, `address`, etc.) — never as a top-level `spec` field alongside `pollingInterval`/`cooldownPeriod`. Each scaler type has its own activation field name, all nested the same way.
+
 ---
 
 ## CKA/CKAD Certification Tips
+
+### Exam Objective Mapping
+
+> **Scope note:** KEDA itself is not a CKA/CKAD exam objective — it's a CNCF Sandbox add-on, not core
+> Kubernetes. Nothing in this demo will appear on the exam as "configure a ScaledObject." What *is* in
+> scope, and what this demo genuinely reinforces, is the underlying native-Kubernetes mechanics KEDA sits
+> on top of: how CRDs work as a general mechanism, how the HPA/External Metrics API relationship functions,
+> Secret-based credential wiring, and CronJob-adjacent scheduling concepts (see the CronJob-vs-cron-scaler
+> comparison above). The table below maps to *those* underlying objectives, not to KEDA as a named topic.
 
 ### Exam Objective Mapping
 
@@ -1565,6 +1592,8 @@ Verify with `kubectl get scaledobject report-worker-scaler` (expect `READY=True`
 | KEDA Metrics Server | Implements `external.metrics.k8s.io` only — never `custom.metrics.k8s.io`; registered as an APIService |
 | KEDA vs. Prometheus Adapter | KEDA: uniform External-only architecture, simpler for aggregate metrics, native scale-to-zero. Adapter: native Pods/Object per-object averaging that KEDA cannot provide |
 | `kubectl get scaledobject` columns | READY: can KEDA reach the source and find the target? ACTIVE: is the trigger currently above its activation condition? |
+| Activation vs. Scaling are separate decisions | Every trigger has two numeric concerns: activation (0↔1, Loop 1) and scaling (1↔N, Loop 2) — different field names, different loops. Activation always wins when they disagree (e.g. queue at 40 with `listLength: 10` but `activationListLength: 50` → scales to zero regardless of the scaling math) |
+| Activation/scaling field placement | Both live inside `triggers[].metadata`, scaler-specific by name (`activationListLength` for redis, `activationThreshold` for prometheus, etc.) — never as a top-level `spec` field |
 
 > **Demo scope:** Primary concept: KEDA architecture and the two-component scale-to-zero/from-zero mechanism (KEDA Operator handles 0↔1, HPA handles 1↔N). Supporting concepts: KEDA components (Operator, Metrics Server), Kubernetes objects KEDA creates, ScaledObject field reference, the two polling loops, activation vs. scaling, Cron scaler as the zero-infrastructure hands-on vehicle, KEDA-vs-Adapter callout for External metrics.
 > Estimated completion time: 40–45 minutes (reading + hands-on + verification), including unavoidable wait time for the cron window cycle.
@@ -1585,6 +1614,31 @@ Verify with `kubectl get scaledobject report-worker-scaler` (expect `READY=True`
 | `kubectl logs -n keda -l app=keda-operator` | KEDA Operator logs — scaling decisions and errors |
 | `kubectl create deployment worker --image=busybox:1.36 --dry-run=client -o yaml` | Generate the base Deployment skeleton this demo's `worker` targets — a plain Deployment, not a KEDA object, so the ordinary imperative equivalent applies. ScaledObject itself has no `kubectl create` imperative shortcut — it's a CRD you always write declaratively |
 | `helm uninstall keda -n keda` | Uninstall KEDA (also removes CRDs and managed HPAs) |
+
+### Generating YAML skeletons with --dry-run
+
+```bash
+kubectl create deployment worker --image=busybox:1.36 --replicas=1 --dry-run=client -o yaml
+```
+
+**Not supported — no imperative shortcut exists (CRDs):** `ScaledObject`, `ScaledJob`,
+`TriggerAuthentication`, `ClusterTriggerAuthentication` — all CRDs with no `kubectl create` equivalent;
+must always be written as YAML directly.
+
+**Exists, but deliberately not used in this demo:** `kubectl autoscale deployment ... --dry-run=client -o yaml` generates a plain HPA skeleton — never run this against a Deployment already managed by a ScaledObject; doing so is exactly Break-Fix Error-2's `AmbiguousSelector` conflict.
+
+**Not supported — commands that read, describe, or operate on running objects:**
+`kubectl get`, `describe`, `logs`, `exec`, `delete`, `apply`, `patch`, `label`
+
+### Imperative Quick-Create Commands
+
+| Object | Imperative command | Notes |
+|---|---|---|
+| Deployment | `kubectl create deployment NAME --image=IMG --replicas=N` | The `worker` Deployment this demo targets |
+| Namespace | `kubectl create namespace keda` | Helm's `--create-namespace` flag does this automatically in Step 1 — not run separately here |
+| ScaledObject | *(no imperative equivalent — CRD)* | Must write YAML directly |
+| TriggerAuthentication | *(no imperative equivalent — CRD)* | Must write YAML directly; used starting in `05-keda-redis-scaler` |
+| HPA | `kubectl autoscale deployment NAME --min=N --max=N --cpu-percent=N` | Exists generically — **do not use** on a Deployment already managed by a ScaledObject (see Break-Fix Error-2) |
 
 ---
 

@@ -21,7 +21,7 @@ This lab builds the complete mental model for Kubernetes horizontal autoscaling 
 - HPA behaviour — custom scale-up/down policies, windows, and selectPolicy
 - Why HPA does not use the Eviction API and what that means for PDB
 
-> **Scope note:** This lab covers HPA fundamentals hands-on (Steps 1–8). VPA installation, algorithm, update modes, and hands-on are in `03-vpa-fundamentals`. Cluster Autoscaler requires cloud infrastructure and is covered in `aws-eks-demos`. Custom/external metrics adapter hands-on is in `05-prometheus-adapter` (minikube) and `aws-eks-demos` (AWS-specific sources).
+> **Scope note:** This lab covers HPA fundamentals hands-on (Steps 1–8). VPA installation, algorithm, update modes, and hands-on are in `03-vpa-fundamentals`. Cluster Autoscaler requires cloud infrastructure and is covered in `aws-eks-demos`. Custom/external metrics adapter hands-on is in `06-prometheus-adapter-pods-type / 07-prometheus-adapter-object-type` (minikube) and `aws-eks-demos` (AWS-specific sources).
 
 ---
 
@@ -1123,7 +1123,7 @@ Why Pods and not Object?
   HPA averages across all pods. Adding a pod adds capacity linearly.
   Object would read a single total value from one Kubernetes object —
   wrong shape for a per-pod throughput metric.
-Hands-on: 05-prometheus-adapter (minikube)
+Hands-on: 06-prometheus-adapter-pods-type (minikube)
 ```
 
 **Type: Object** — requires custom metrics adapter
@@ -1144,7 +1144,7 @@ Why Object and not Pods?
   HPA compares that single total value against the target.
   Pods type would try to read the metric from each backend pod,
   which does not apply here — the metric source is the Ingress itself.
-Hands-on: 05-prometheus-adapter (minikube)
+Hands-on: 07-prometheus-adapter-object-type (minikube)
 ```
 
 **Type: External** — requires external metrics adapter
@@ -1196,7 +1196,7 @@ Note: in practice, many adapters implement BOTH APIs.
         and supports scale-to-zero (HPA minReplicas ≥ 1, KEDA can go to 0)
 ```
 
-> Types Pods, Object, and External require a metrics adapter. This demo covers Resource only. ContainerResource is in `02-hpa-advanced`. Adapter hands-on is in `05-prometheus-adapter` and `aws-eks-demos`.
+> Types Pods, Object, and External require a metrics adapter. This demo covers Resource only. ContainerResource is in `02-hpa-advanced`. Adapter hands-on is in `06-prometheus-adapter-pods-type / 07-prometheus-adapter-object-type` and `aws-eks-demos`.
 
 ---
 
@@ -1475,7 +1475,7 @@ KEDA — Kubernetes Event-Driven Autoscaling:
   Use case: message queue consumer — scale to 0 when queue empty
   Implements both custom.metrics.k8s.io and external.metrics.k8s.io
   50+ built-in scalers (SQS, Kafka, Redis, cron, HTTP, Prometheus)
-  Hands-on: 04-keda-adapter
+  Hands-on: 04-keda-fundamentals & 05-keda-redis-scaler
 
 Karpenter:
   AWS-native node provisioner — modern replacement for CA on EKS
@@ -1673,6 +1673,13 @@ spec:
           type: Utilization
           averageUtilization: 50    # target 50% of the 100m request = 50m average per pod
 ```
+
+⚡ **Imperative equivalent:** `kubectl autoscale deployment nginx-deploy --min=1 --max=5 --cpu=50%`
+— fully equivalent to this YAML for a basic `Resource`-type CPU HPA (confirmed hands-on
+in Step 7 of this same lab). Note this callout would normally be redundant with Step 7,
+but Step 7 is written as its own dedicated teaching step rather than an inline callout —
+keep both, since Step 7 covers something this callout doesn't: verifying the generated
+object is stored as `autoscaling/v2` regardless of flag syntax.
 
 ```bash
 kubectl apply -f 03-hpa-cpu-v2.yaml
@@ -2511,6 +2518,46 @@ HPA was designed before the Eviction API matured. Its scale-down path uses direc
 | Task says "create an HPA that scales at 50% CPU" via the imperative command | `kubectl autoscale deployment X --cpu=50% --min=1 --max=5` — current, non-deprecated flag, with `--min`/`--max` both set | Using the deprecated `--cpu-percent=50` flag, or omitting `--min`/`--max` (both required) |
 | Task ends up with two HPA objects both targeting the same Deployment | Recognize `AmbiguousSelector` in HPA events and delete the extra HPA — only one HPA per workload is valid | Assuming the HPAs will "merge" their metrics, or that the most recently applied one silently takes over |
 
+### Exam Task — Write it from scratch
+
+**Task:** From scratch, write an HPA that:
+- Targets a Deployment named `api`
+- Scales on CPU, target 60% utilization
+- minReplicas: 2, maxReplicas: 6
+- Then, using only imperative commands (no YAML), create an equivalent HPA for a
+  second Deployment named `worker` with min=1, max=4, target 50% CPU
+
+<details>
+<summary>Reference solution</summary>
+
+\```yaml
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: api-hpa
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: api
+  minReplicas: 2
+  maxReplicas: 6
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 60
+\```
+
+\```bash
+kubectl autoscale deployment worker --min=1 --max=4 --cpu=50%
+\```
+</details>
+
+Key fields to recall: `maxReplicas` has no default and is required; the modern
+imperative flag is `--cpu=50%`, not the deprecated `--cpu-percent=50`.
 ---
 
 ## Key Takeaways
@@ -2554,6 +2601,29 @@ HPA was designed before the Eviction API matured. Its scale-down path uses direc
 | `kubectl top nodes` | Current node CPU/memory |
 | `kubectl get apiservices \| grep metrics` | Verify Metrics API is registered |
 | `kubectl get events --sort-by='.lastTimestamp' \| grep -i scale` | Scaling events |
+
+### Generating YAML skeletons with --dry-run
+
+```bash
+kubectl create deployment nginx-deploy --image=nginx:1.27 --dry-run=client -o yaml
+kubectl expose deployment nginx-deploy --port=80 --target-port=80 --dry-run=client -o yaml
+kubectl run load-generator --image=busybox:1.36 --dry-run=client -o yaml
+kubectl autoscale deployment nginx-deploy --min=1 --max=5 --cpu=50% --dry-run=client -o yaml
+```
+
+**Not supported for this demo's advanced HPA fields:** `--dry-run` for `kubectl autoscale`
+only produces a basic `type: Resource` HPA. `behavior` policies, `ContainerResource`,
+`Pods`/`Object`/`External` metric types all require hand-written or hand-edited YAML —
+there is no imperative flag for any of them.
+
+### Imperative Quick-Create Commands
+
+| Object | Imperative command | Notes |
+|---|---|---|
+| Deployment | `kubectl create deployment NAME --image=IMG` | |
+| Service (ClusterIP) | `kubectl expose deployment NAME --port=80 --target-port=80` | Separate command from Deployment creation |
+| Pod | `kubectl run NAME --image=IMG` | Used for the load generator |
+| HPA (basic) | `kubectl autoscale deployment NAME --min=N --max=N --cpu=N%` | Only produces `type: Resource`; everything else requires YAML |
 
 ---
 

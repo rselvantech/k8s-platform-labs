@@ -18,7 +18,7 @@ Getting resource requests right matters more than it might seem: too low causes 
 - HPA + VPA conflict — why the specific combination of HPA-on-CPU + VPA-Recreate-on-CPU conflicts, and the safe patterns
 - Sizing strategy for `minAllowed`/`maxAllowed` values using VPA data
 
-> **Scope note:** This lab runs on minikube `3node` (same cluster as `01-hpa-basic` and `02-hpa-advanced`). VPA is installed from `github.com/kubernetes/autoscaler` via `vpa-up.sh`. HPA fundamentals are a required prerequisite — see `01-hpa-basic`. Cluster Autoscaler and KEDA are covered in `aws-eks-demos` and `04-keda-adapter` respectively.
+> **Scope note:** This lab runs on minikube `3node` (same cluster as `01-hpa-basic` and `02-hpa-advanced`). VPA is installed from `github.com/kubernetes/autoscaler` via `vpa-up.sh`. HPA fundamentals are a required prerequisite — see `01-hpa-basic`. Cluster Autoscaler and KEDA are covered in `aws-eks-demos` and `04-keda-fundamentals` respectively.
 
 > **Verification status:** Lab steps and expected outputs are written from documented VPA behaviour consistent with the facts verified in `01-hpa-basic`. They have not yet been run against this lab's manifests on a live cluster — run through the steps and report back any differences.
 
@@ -2031,7 +2031,7 @@ kubectl scale deployment nginx-deploy --replicas=1
 
 ---
 
-### Step 5 — Cleanup
+### Step 6 — Cleanup
 
 ```bash
 kubectl delete -f 01-nginx-deploy.yaml --ignore-not-found
@@ -2056,8 +2056,7 @@ No resources found in default namespace.
 **VPA uninstall — optional:**
 
 VPA is a cluster-wide component. Uninstall it only if you do not plan to use it in
-subsequent labs on this cluster. If you are proceeding to `04-keda` or
-`05-prometheus-adapter`, VPA can remain installed — it does not interfere with
+subsequent labs on this cluster. If you are proceeding to subsequent demos in this series, VPA can remain installed — it does not interfere with
 either of those demos.
 
 ```bash
@@ -2341,6 +2340,49 @@ VPACheckpoint is a CRD object automatically created by the VPA Recommender — o
 | Task has both an HPA on CPU and a VPA in Recreate mode on CPU targeting the same Deployment, and replica count oscillates without any load change | Recognize the two tools are fighting over the same signal (CPU request) — switch VPA to Off mode, or move HPA to a non-CPU/memory metric | Adjusting HPA thresholds or VPA min/maxAllowed values to "smooth out" the oscillation instead of removing the underlying conflict |
 | `kubectl describe vpa` shows `Target: cpu=50m` and `Uncapped Target: cpu=200m`, and the task asks why the pod still throttles under peak load | Recognize `maxAllowed` is capping the recommendation well below what usage data calls for, and raise `maxAllowed.cpu` accordingly | Treating Target as the "correct" answer and looking for an unrelated cause of the throttling (node capacity, kubelet config) |
 | Task deploys a container with no `resources.requests` at all, applies a VPA in Off mode, and asks whether this is a safe setup | Identify that a pod with no requests is BestEffort QoS — first evicted under node memory pressure — regardless of what VPA reports; set baseline requests before layering VPA on top | Concluding the setup is fine because `kubectl describe vpa` shows `PROVIDED=True` with a valid Target |
+| Task under time pressure reaches for `kubectl create vpa ...` or a `--dry-run` skeleton for a VerticalPodAutoscaler | Recognize VPA has no imperative creation path at all — it's a CRD with no dedicated `kubectl create` verb, unlike Deployments/HPAs | Wasting exam time searching for an imperative shortcut that doesn't exist; write the YAML directly from memory instead |
+
+### Exam Task — Write it from scratch
+
+**Task:** From scratch, write a VPA that:
+- Targets a Deployment named `worker`
+- Update mode: `Initial` (safest active mode — no eviction of running pods)
+- Container `worker`: minAllowed cpu=50m/memory=64Mi, maxAllowed cpu=1/memory=1Gi
+- controlledValues: `RequestsOnly`
+
+<details>
+<summary>Reference solution</summary>
+
+```yaml
+apiVersion: autoscaling.k8s.io/v1
+kind: VerticalPodAutoscaler
+metadata:
+  name: worker-vpa
+spec:
+  targetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: worker
+  updatePolicy:
+    updateMode: "Initial"
+  resourcePolicy:
+    containerPolicies:
+      - containerName: worker
+        minAllowed:
+          cpu: 50m
+          memory: 64Mi
+        maxAllowed:
+          cpu: "1"
+          memory: 1Gi
+        controlledValues: RequestsOnly
+```
+</details>
+
+Key fields to recall: there is **no imperative `kubectl create` for VPA** — it must
+always be written declaratively (worth stating explicitly as its own exam-trap row too,
+see ADD 4 below). `controlledValues: RequestsOnly` combined with a `maxAllowed` below
+the manifest's existing `limits` is what keeps `RequestsOnly` safe (see Concepts section
+on the RequestsOnly-exceeds-limit failure mode).
 
 ---
 
@@ -2382,6 +2424,26 @@ VPACheckpoint is a CRD object automatically created by the VPA Recommender — o
 | `kubectl get pods -n kube-system \| grep vpa` | Verify all three VPA components are running |
 | `kubectl get events --sort-by='.lastTimestamp' \| grep -i vpa` | VPA eviction events |
 | `kubectl logs -n kube-system -l app=vpa-recommender` | Debug recommendations not appearing |
+
+### Generating YAML skeletons with --dry-run
+
+\```bash
+kubectl create deployment nginx-deploy --image=nginx:1.27 --dry-run=client -o yaml > deploy.yaml
+kubectl expose deployment nginx-deploy --port=80 --target-port=80 --dry-run=client -o yaml
+\```
+
+**Not supported — CRDs, no imperative shortcut exists:**
+`VerticalPodAutoscaler`, `VerticalPodAutoscalerCheckpoint` — both must be written as full
+YAML directly; there is no `kubectl create vpa` command. This is itself worth remembering
+as an exam trap (see Cert Tips).
+
+### Imperative Quick-Create Commands
+
+| Object | Imperative command | Notes |
+|---|---|---|
+| Deployment | `kubectl create deployment NAME --image=IMG` | |
+| Service (ClusterIP) | `kubectl expose deployment NAME --port=80 --target-port=80` | Separate command — not combined with Deployment creation |
+| VerticalPodAutoscaler | *(no imperative equivalent — CRD)* | Must write YAML directly |
 
 ---
 
