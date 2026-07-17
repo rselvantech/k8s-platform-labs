@@ -1,0 +1,6 @@
+# Applied via: kubectl patch triggerauthentication redis-trigger-auth -n keda-demo --type merge -p "$(cat src/break-fix/02-broken-triggerauth.yaml)"
+spec:
+  secretTargetRef:
+    - parameter: password
+      name: redis-queue
+      key: wrong-key    # correct key is redis-password

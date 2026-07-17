@@ -1,0 +1,26 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redis-list-consumer
+  namespace: keda-demo
+spec:
+  replicas: 0
+  selector:
+    matchLabels:
+      app: redis-list-consumer
+  template:
+    metadata:
+      labels:
+        app: redis-list-consumer
+    spec:
+      containers:
+        - name: consumer
+          image: "<TBD — see Assumption A3>"   # unresolved placeholder — the actual bug
+          env:
+            - name: REDIS_HOST
+              value: redis-queue-master.keda-demo.svc.cluster.local
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: redis-queue
+                  key: redis-password

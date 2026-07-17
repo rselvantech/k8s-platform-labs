@@ -1,0 +1,16 @@
+#deck:k8s-platform-labs::11-auto-scaling::05-keda-redis-scaler
+#separator:Comma
+#columns:Front,Back,Tags
+"What Redis command blocks waiting for a list item, and what's its non-blocking equivalent?","BRPOP (blocking); RPOP is the non-blocking equivalent","cka ckad redis"
+"Why does the Bitnami Redis chart deploy a StatefulSet instead of a Deployment?","Stateful services need stable, predictable pod identity and storage that follows a specific ordinal across rescheduling, even if the multi-replica benefit isn't exercised at one replica","cka ckad k8s-objects"
+"In TriggerAuthentication.spec.secretTargetRef, what does the 'parameter' field actually refer to?","Not a Kubernetes field name -- the name the specific scaler expects internally for that credential (e.g. 'password' for the redis scaler)","cka ckad keda"
+"Does editing a TriggerAuthentication's secretTargetRef immediately break an already-active scaler connection?","No -- Redis doesn't re-check credentials on an existing open connection; the failure only surfaces when a new connection is attempted","cka ckad keda redis"
+"In a redis-type KEDA trigger, what's the difference between activationListLength and listLength?","activationListLength gates whether to scale from zero at all; listLength is the scaling target used to compute desired replica count once active","cka ckad keda"
+"Is the activation threshold comparison >= or strictly >?","Strictly greater-than; a value exactly at the threshold stays inactive","cka ckad keda"
+"Why might kubectl describe hpa show Min replicas: 1 even though the ScaledObject's minReplicaCount is 0?","KEDA manages the 0-to-1 transition itself, outside the underlying HPA's own bounds","cka ckad keda hpa"
+"What happens if a producer pushes to the wrong Redis list name relative to the ScaledObject's listName?","Nothing visible -- no error anywhere; the ScaledObject simply never activates","cka ckad keda troubleshooting"
+"Is there an imperative kubectl create command for ScaledObject, TriggerAuthentication, or StatefulSet?","No -- all three require YAML written directly; no imperative shortcut exists for any of them","cka ckad exam-trap"
+"What Kubernetes error indicates a malformed image reference string, distinct from a failed pull?","InvalidImageName -- fails at parse time, before any pull attempt is even made","cka ckad troubleshooting"
+"A container can't resolve a valid Service DNS name but nslookup succeeds against the same name. What's the likely cause?","A musl libc (Alpine Linux) DNS resolver limitation -- confirm via nslookup (works) vs getent hosts (fails)","cka ckad troubleshooting dns"
+"What's the standard fix for musl/Alpine DNS resolution failures in Kubernetes?","Use a glibc-based image instead (e.g. redis:7 instead of redis:7-alpine) for anything doing repeated DNS lookups","cka ckad troubleshooting"
+"What's a faster, more reliable alternative to kubectl run --rm -it for repeated Redis CLI checks?","kubectl exec into the already-running redis-queue-master-0 pod -- no image pull, no attach race","cka ckad ops"

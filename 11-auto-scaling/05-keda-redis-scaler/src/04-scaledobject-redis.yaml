@@ -1,0 +1,21 @@
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: redis-consumer-scaledobject
+  namespace: keda-demo
+spec:
+  scaleTargetRef:
+    name: redis-list-consumer
+  pollingInterval: 15
+  cooldownPeriod: 60
+  minReplicaCount: 0
+  maxReplicaCount: 5
+  triggers:
+    - type: redis
+      metadata:
+        address: redis-queue-master.keda-demo.svc.cluster.local:6379
+        listName: work-queue
+        listLength: "5"
+        activationListLength: "1"
+      authenticationRef:
+        name: redis-trigger-auth
