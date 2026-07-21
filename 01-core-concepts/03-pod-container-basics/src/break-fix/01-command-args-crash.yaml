@@ -1,0 +1,11 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: command-crash
+spec:
+  restartPolicy: Never
+  containers:
+    - name: app
+      image: nginx:1.30.4
+      command: ["nginx"]
+      args: ["-c", "/does/not/exist.conf"]   # points at a config file that doesn't exist

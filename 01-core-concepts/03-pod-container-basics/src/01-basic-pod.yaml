@@ -1,0 +1,31 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: nginx-pod
+  namespace: default
+  labels:
+    app: nginx                  # see Anatomy of a Pod
+    version: "1.30.4"
+spec:
+  restartPolicy: Always              # see Anatomy of a Pod
+  terminationGracePeriodSeconds: 30  # see Anatomy of a Pod
+  containers:
+    - name: nginx
+      image: nginx:1.30.4            # see Anatomy of a Container
+      imagePullPolicy: IfNotPresent  # see Anatomy of a Container
+      command: ["nginx"]             # overrides ENTRYPOINT — see Anatomy of a Container
+      args: ["-g", "daemon off;"]    # overrides CMD — see Anatomy of a Container
+      ports:
+        - name: http                # see Anatomy of a Container — informational only
+          containerPort: 80
+          protocol: TCP
+      env:
+        - name: ENV_NAME
+          value: "production"       # see Anatomy of a Container
+      resources:
+        requests:
+          cpu: "100m"                # see Anatomy of a Container
+          memory: "128Mi"
+        limits:
+          cpu: "500m"
+          memory: "256Mi"

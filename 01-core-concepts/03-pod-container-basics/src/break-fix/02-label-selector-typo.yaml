@@ -1,0 +1,10 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: typo-pod
+  labels:
+    app: web-fronted    # typo: should be "web-frontend"
+spec:
+  containers:
+    - name: nginx
+      image: nginx:1.30.4
