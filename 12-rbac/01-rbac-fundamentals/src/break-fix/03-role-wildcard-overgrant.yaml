@@ -1,0 +1,11 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: pod-log-reader
+  namespace: ci
+rules:
+- apiGroups: [""]
+  resources: ["*"]              # BUG: intended "pods" and "pods/log" only,
+  verbs: ["get", "list", "watch"]  # but "*" silently grants every core-group
+                                   # resource — configmaps, secrets, services,
+                                   # everything — not just the two intended

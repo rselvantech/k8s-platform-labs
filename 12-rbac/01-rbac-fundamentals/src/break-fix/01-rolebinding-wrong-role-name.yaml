@@ -1,0 +1,13 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: new-hire-pod-log-reader        # a NEW name — does not collide with Step 4's RoleBinding
+  namespace: ci
+subjects:
+- kind: User
+  name: new-hire                       # a NEW subject — not ci-pipeline
+  apiGroup: rbac.authorization.k8s.io
+roleRef:
+  kind: Role
+  name: pod-log-raeder        # typo — the actual Role is named "pod-log-reader"
+  apiGroup: rbac.authorization.k8s.io

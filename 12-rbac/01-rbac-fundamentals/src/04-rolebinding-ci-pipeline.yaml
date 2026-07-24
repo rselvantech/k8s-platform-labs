@@ -1,0 +1,14 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: ci-pipeline-pod-log-reader
+  namespace: ci                              # must match the Role's namespace — Roles and
+                                              # RoleBindings must always live in the same namespace
+subjects:
+- kind: User
+  name: ci-pipeline                          # arbitrary string — no User object exists to create
+  apiGroup: rbac.authorization.k8s.io
+roleRef:
+  kind: Role
+  name: pod-log-reader                       # must exactly match Step 3's Role name
+  apiGroup: rbac.authorization.k8s.io

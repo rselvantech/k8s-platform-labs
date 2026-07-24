@@ -1,0 +1,12 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: pod-log-reader
+  namespace: ci                        # ← namespace scope: this grant is invisible outside ci
+rules:
+- apiGroups: [""]                      # core API group — Pods and their log subresource live here
+  resources: ["pods", "pods/log"]      # NOT "pod" (singular) — resource names are always plural
+  verbs: ["get", "list", "watch"]      # read-only: no create/update/patch/delete
+- apiGroups: ["apps"]                  # Deployments live in the "apps" group, not core
+  resources: ["deployments"]
+  verbs: ["get", "list", "watch"]      # lets rollout status be checked without write access
