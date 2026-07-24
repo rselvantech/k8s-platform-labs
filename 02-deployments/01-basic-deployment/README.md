@@ -12,7 +12,7 @@ understand exactly how it creates and owns a ReplicaSet and Pods underneath
 it (down to the actual labeling mechanism that makes it work), and observe
 self-healing in action. This demo deliberately stays scoped to a *stable*
 Deployment — no updates, no strategies yet. Once you understand how a
-Deployment manages a single, unchanging version, `02-rolling-update-rollback`
+Deployment manages a single, unchanging version, `02-rolling-update-recreate`
 covers what happens when the pod template *changes*, and
 `03-deployment-strategies` covers Blue-Green and Canary patterns built on
 top of that.
@@ -43,13 +43,15 @@ kubectl get nodes
 By the end of this lab, you will be able to:
 1. ✅ Create and deploy a basic Kubernetes Deployment
 2. ✅ Write a Deployment selector using both `matchLabels` and `matchExpressions`, and know when each is appropriate
-3. ✅ Explain every field in a Deployment spec, including what's deferred to `02-rolling-update-rollback` and `03-deployment-strategies`
+3. ✅ Explain every field in a Deployment spec, including what's deferred to `02-rolling-update-recreate` and `03-deployment-strategies`
 4. ✅ Explain the `pod-template-hash` mechanism that actually connects a Deployment to its ReplicaSet and Pods
 5. ✅ Walk through the full end-to-end flow of creating/scaling a Deployment, and how it hands off to the Pod-creation flow already covered in `01-core-concepts`
 6. ✅ Verify Deployment status and health
 7. ✅ Observe Kubernetes self-healing in action, and explain which controller is actually doing it
 8. ✅ Scale Deployments up and down, including to zero
 9. ✅ Properly clean up Kubernetes resources
+10. ✅ Explain what `kubectl describe rs` reveals about a ReplicaSet's ownership, and why scaling or editing it directly doesn't stick
+11. ✅ Change a Deployment's selector without a downtime window, using `--cascade=orphan`
 
 ## Directory Structure
 
@@ -118,8 +120,8 @@ Deployment (nginx-deploy)
 Deployments provide:
 - **Self-healing** — automatic pod restart if they crash or are deleted
 - **Scaling** — easy to change the number of replicas
-- **Rolling updates** — update applications with zero downtime (full mechanics in `02-rolling-update-rollback`)
-- **Rollback** — revert to previous versions if updates fail (also `02-rolling-update-rollback`)
+- **Rolling updates** — update applications with zero downtime (full mechanics in `02-rolling-update-recreate`)
+- **Rollback** — revert to previous versions if updates fail (also `02-rolling-update-recreate`)
 - **Declarative management** — describe what you want, Kubernetes makes it happen
 
 This is the same "naked pods have no self-healing" point from
@@ -140,11 +142,11 @@ creating pods directly.
 | `spec.replicas` | Desired number of pod replicas |
 | `spec.selector` | How the Deployment identifies which pods belong to it — immutable once set |
 | `spec.template` | The full Pod template — identical in shape to a standalone Pod spec |
-| `spec.strategy` *(deferred)* | Controls how pods are replaced when the template changes — full treatment in `02-rolling-update-rollback` |
-| `spec.revisionHistoryLimit` *(deferred)* | How many old ReplicaSets to retain for rollback — `02-rolling-update-rollback` |
+| `spec.strategy` *(deferred)* | Controls how pods are replaced when the template changes — full treatment in `02-rolling-update-recreate` |
+| `spec.revisionHistoryLimit` *(deferred)* | How many old ReplicaSets to retain for rollback — `02-rolling-update-recreate` |
 | `spec.minReadySeconds` | How long a new pod must stay Ready before it's considered available |
 | `spec.progressDeadlineSeconds` | How long the controller waits for progress before flagging the Deployment as stuck |
-| `spec.paused` *(deferred)* | Freezes the controller from acting on template changes — `02-rolling-update-rollback` |
+| `spec.paused` *(deferred)* | Freezes the controller from acting on template changes — `02-rolling-update-recreate` |
 
 Full explanation of each field follows below.
 
@@ -194,11 +196,11 @@ visual breakdown of exactly where this nests.
 the template changes: `RollingUpdate` (default) or `Recreate`. Since this
 demo never changes the template after creation, strategy has nothing to do
 yet — full treatment, including `maxSurge`/`maxUnavailable`, is
-`02-rolling-update-rollback`'s entire subject.
+`02-rolling-update-recreate`'s entire subject.
 
 **`spec.revisionHistoryLimit`** *(deferred)* — How many old ReplicaSets to
 retain for rollback purposes (default 10). Only meaningful once updates
-exist to have a history of — covered in `02-rolling-update-rollback`.
+exist to have a history of — covered in `02-rolling-update-recreate`.
 
 **`spec.minReadySeconds`** — How long a newly created pod must stay
 `Ready` before it's considered available. Default `0` (available the
@@ -214,7 +216,7 @@ something that halts or reverts anything by itself — it only changes what
 **`spec.paused`** *(deferred)* — Freezes the Deployment controller from
 acting on template changes. Meaningful in the context of controlled
 rollouts — covered alongside `kubectl rollout pause`/`resume` in
-`02-rolling-update-rollback`.
+`02-rolling-update-recreate`.
 
 ---
 
@@ -284,7 +286,7 @@ spec:
 ```
 This is a plain equality check: the Deployment manages every pod whose
 `metadata.labels` includes `app: nginx`, nothing more. This is what
-`02-rolling-update-rollback` and `03-deployment-strategies` both use
+`02-rolling-update-recreate` and `03-deployment-strategies` both use
 throughout, and it's what you should reach for by default — it covers the
 overwhelming majority of real-world cases.
 
@@ -339,7 +341,7 @@ ReplicaSet's actual selector:     app: nginx, pod-template-hash: 7d9f8b6c4
 ```
 
 This mechanism is what makes the entire rolling-update model in
-`02-rolling-update-rollback` possible: change the pod template, and its
+`02-rolling-update-recreate` possible: change the pod template, and its
 hash changes, which means the Deployment controller creates a **new**
 ReplicaSet with a new hash — rather than trying to somehow mutate the
 existing one — while the old ReplicaSet (and its now-mismatched hash)
@@ -379,7 +381,7 @@ Deployments go through the identical pipeline, just for a different object
 kind. Once persisted, the **Deployment controller** (a control loop running
 inside kube-controller-manager, watching for Deployment objects) notices it,
 computes the `pod-template-hash` described above, and creates a ReplicaSet
-— setting itself as that ReplicaSet's **owner** via an owner reference(refer `Controlled By` parameter in `kubectl describe`). This
+— setting itself as that ReplicaSet's **owner** via an owner reference (refer `Controlled By` parameter in `kubectl describe`). This
 owner reference is the mechanism behind cascading deletes: delete the
 Deployment, and Kubernetes' garbage collector deletes everything that
 declares the Deployment as its owner, all the way down.
@@ -411,6 +413,28 @@ carrying its `pod-template-hash`) and creates a replacement immediately.
 This is worth being precise about, since "the Deployment self-heals" is a
 common but slightly imprecise way to describe what's actually two
 controllers, one level apart, each reconciling only its own tier.
+
+---
+
+## Don't Manage a Deployment's ReplicaSet Directly
+
+Everything above establishes that the ReplicaSet controller—not the Deployment—is what actually watches and reconciles Pod count. A natural follow-up question is: what happens if *you* try to act directly on a Deployment-owned ReplicaSet, bypassing the Deployment entirely? Official Kubernetes documentation is explicit that you shouldn't, because the Deployment remains the **source of truth** for the application's desired state.
+
+* **Scaling it directly** (`kubectl scale replicaset <name> --replicas=N`) — the Deployment controller continuously reconciles the ReplicaSet's `spec.replicas` back to whatever the **Deployment's** `spec.replicas` specifies. Your manual change is overwritten, typically within seconds—you'll see the ReplicaSet's replica count briefly change before returning to the Deployment's desired value. This demo's **Break-Fix Error-3** demonstrates this behavior.
+* **Editing its Pod template directly** — a Deployment treats each ReplicaSet as a specific rollout revision rather than something to modify in place. Any change to the application's desired configuration—such as the container image, environment variables, resource requirements, or Pod labels—should be made on the **Deployment**, not on its managed ReplicaSet or individual Pods. The Deployment then creates a **new ReplicaSet** representing the updated revision and gradually replaces the old one through a rolling update. Editing a Deployment-managed ReplicaSet directly is unsupported and can be rejected or leave it inconsistent with the Deployment's desired state.
+* **Deleting it directly** — the Deployment controller notices that the expected ReplicaSet is missing and simply creates a replacement ReplicaSet from the Deployment's current `spec.template`. You haven't permanently removed the application's controller-managed state—you've only forced the Deployment to recreate one of its managed resources.
+
+The practical rule is simple: **treat the Deployment as the only control surface.** Any change to your application's desired state—replica count, container image, resources, labels, or environment variables—should be made on the **Deployment**, not on the ReplicaSet. The ReplicaSet is an implementation detail created and managed by the Deployment to maintain the desired number of Pods and support rolling updates.
+
+---
+
+### Working Around an Immutable Selector — `--cascade=orphan`
+
+`spec.selector` is immutable (as demonstrated earlier in this demo and in **Break-Fix Error-2**). When a Deployment's selector genuinely needs to change, the standard approach is to create a **new** Deployment with the desired selector and migrate traffic using Kubernetes' normal rolling update mechanisms. Simply deleting and recreating the Deployment can briefly remove the managing controller and, depending on how it is performed, may also terminate the existing ReplicaSet and Pods.
+
+`kubectl delete deployment <name> --cascade=orphan` provides an alternative deletion behavior. Instead of deleting the entire ownership hierarchy, Kubernetes removes **only** the Deployment object while leaving its ReplicaSet and Pods running by orphaning them (removing their owner reference). This avoids immediately terminating the running workload and can be useful during advanced recovery, controller migration, or ownership transfer scenarios.
+
+> **Note:** `--cascade=orphan` is an advanced ownership-preservation mechanism rather than a common solution for changing Deployment selectors. Although Kubernetes controllers can adopt orphaned resources under specific conditions, this is not the typical method for migrating to a new selector. In practice, selector changes are usually handled by creating a new Deployment and performing a standard rolling update. Orphaning is more commonly used to preserve child resources while removing a parent object—for example, `kubectl delete cronjob backup --cascade=orphan` removes the CronJob while allowing existing Jobs and Pods to continue running, or when removing/replacing a custom controller or Operator without deleting the workloads it manages.
 
 ---
 
@@ -568,6 +592,74 @@ by the control plane itself, regardless of cluster). It appears in this
 output only because this lab never switches away from `default`; running
 `kubectl get all -n <other-namespace>` would not show it at all.
 
+**Now look at the ReplicaSet in detail — this is where the ownership
+chain from End-to-End stops being theory:**
+
+```bash
+kubectl describe rs nginx-deploy-85f7d4dd78
+```
+
+**Expected output (trimmed to what's worth reading):**
+
+```
+Name:           nginx-deploy-85f7d4dd78
+Namespace:      default
+Selector:       app=nginx,pod-template-hash=85f7d4dd78
+Labels:         app=nginx
+                pod-template-hash=85f7d4dd78
+Annotations:    deployment.kubernetes.io/desired-replicas: 3
+                deployment.kubernetes.io/max-replicas: 4
+                deployment.kubernetes.io/revision: 1
+Controlled By:  Deployment/nginx-deploy
+Replicas:       3 current / 3 desired
+Pods Status:    3 Running / 0 Waiting / 0 Succeeded / 0 Failed
+Pod Template:
+  Labels:  app=nginx
+           pod-template-hash=85f7d4dd78
+  Containers:
+   nginx:
+    Image:      nginx:1.30.4
+    Port:       80/TCP
+    Host Port:  0/TCP
+Events:
+  Type    Reason            Age   From                   Message
+  ----    ------            ----  ----                   -------
+  Normal  SuccessfulCreate  9m    replicaset-controller  Created pod: nginx-deploy-85f7d4dd78-29r6g
+  Normal  SuccessfulCreate  9m    replicaset-controller  Created pod: nginx-deploy-85f7d4dd78-2fhcd
+  Normal  SuccessfulCreate  9m    replicaset-controller  Created pod: nginx-deploy-85f7d4dd78-bdkt9
+```
+
+Every field here explained, since several of them only make sense with
+what you already know from **Deployment Internals** and **End-to-End**:
+
+- **`Selector: app=nginx,pod-template-hash=85f7d4dd78`** — this is the
+  exact narrower, auto-generated selector from **Deployment Internals**
+  above, now visible directly rather than inferred from a `jsonpath` query
+  (as Step 4 below does). Compare it to the *Deployment's* own selector
+  (`app=nginx` alone, no hash) and the difference is right there.
+- **`Controlled By: Deployment/nginx-deploy`** — the owner reference from
+  **End-to-End**, one level up from what a Pod's own `describe` shows
+  (`Controlled By: ReplicaSet/...`). Following `Controlled By` upward at
+  each level is how you'd trace any Pod all the way back to the
+  Deployment that ultimately owns it.
+- **`Annotations: deployment.kubernetes.io/desired-replicas` /
+  `max-replicas` / `revision`** — these three are written by the
+  *Deployment* controller onto the ReplicaSet it owns, not by you and not
+  by the ReplicaSet controller itself. `max-replicas` in particular is
+  worth noticing: `4`, not `3` — this is `spec.replicas` (3) plus
+  `maxSurge`'s default of 25% rounded up to 1 extra, the same
+  `RollingUpdateStrategy` defaults you'll see again in Step 5's
+  `describe deployment` output. `revision` mirrors the Deployment's own
+  `deployment.kubernetes.io/revision` annotation, covered fully in `02-rolling-update-recreate`.
+- **`Replicas: 3 current / 3 desired`** and **`Pods Status`** — the
+  ReplicaSet controller's own view of its reconciliation target and
+  actual state, the mechanism behind every self-healing and scaling
+  observation in Steps 7–8 below.
+- **`Events` — `SuccessfulCreate`, `From: replicaset-controller`** — the
+  control loop from **End-to-End** naming itself directly in its own
+  event log, the ReplicaSet-level equivalent of the
+  `deployment-controller` events you'll see in Step 5.
+
 ---
 
 ### Step 4: See the pod-template-hash label directly
@@ -639,7 +731,7 @@ Every value here explained:
 - **`RollingUpdateStrategy: 25% max unavailable, 25% max surge`** — these
   percentages are the *defaults* you get for free even though this demo's
   YAML never set `spec.strategy` at all; full meaning of `maxSurge`/
-  `maxUnavailable` is `02-rolling-update-rollback`'s subject, not this
+  `maxUnavailable` is `02-rolling-update-recreate`'s subject, not this
   demo's — noted here only because you'll see it in your own `describe`
   output regardless.
 - **`Conditions` → `Available: True` / `Progressing: True`** — two
@@ -653,7 +745,7 @@ Every value here explained:
   visible in `describe` output: right now there's only ever one ReplicaSet
   for this Deployment, so `OldReplicaSets` is empty — this pair of fields
   is what actually holds the two ReplicaSets side-by-side during a rollout
-  in `02-rolling-update-rollback`.
+  in `02-rolling-update-recreate`.
 - **`Events`** — same Events mechanism already covered for Pods in
   `01-core-concepts`, just at the Deployment level: `deployment-controller`
   here is literally the name of the control loop from **End-to-End**
@@ -759,14 +851,22 @@ on Pods directly.
 kubectl rollout restart deployment/nginx-deploy
 ```
 This is not scaling and doesn't change `spec.replicas` at all — it
-recreates every existing Pod (one at a time, respecting the same
-`RollingUpdateStrategy` shown in Step 5) **without changing the pod
-template**, by patching a restart timestamp annotation that forces a new
-rollout with an otherwise-identical spec. Useful for picking up a changed
-ConfigMap/Secret that a Pod only reads at startup, or simply forcing a
-fresh set of containers. Since the template itself doesn't change, this
-does **not** produce a new `pod-template-hash` — same ReplicaSet, brand
-new Pods.
+forces every existing Pod to be recreated (one at a time, respecting the
+same `RollingUpdateStrategy` shown in Step 5) by patching a
+`kubectl.kubernetes.io/restartedAt` timestamp annotation onto
+`spec.template.metadata.annotations`. That's a genuine change to the Pod
+template, not a bypass of it — and since `pod-template-hash` is computed
+from the entire template, including its annotations, this small change
+is enough to produce a **new** hash and a **new** ReplicaSet, exactly
+like any other template edit covered in **Deployment Internals** above.
+Run `kubectl get rs` immediately after a restart and you'll see it: a
+fresh ReplicaSet name, not the same one reused.
+
+Useful for picking up a changed ConfigMap/Secret that a Pod only reads at
+startup, or simply forcing a fresh set of containers, without touching
+the image or any other field a teammate reading the diff would need to
+care about. The application-facing spec (image, env, resources) is
+unchanged — only the template's metadata differs.
 
 ---
 
@@ -918,6 +1018,8 @@ In this lab, you:
 - ✅ Verified deployment health using `kubectl get` and `kubectl describe`
 - ✅ Witnessed self-healing, and correctly attributed it to the ReplicaSet controller, not the Deployment directly
 - ✅ Scaled deployments up, down, and to zero using `kubectl scale`, and know how `kubectl rollout restart` differs from scaling
+- ✅ Read a ReplicaSet's own `describe` output — its owner reference, and the `desired-replicas`/`max-replicas` annotations the Deployment controller writes onto it
+- ✅ Proved that scaling a Deployment-owned ReplicaSet directly does not persist because the Deployment controller reconciles it back to the Deployment's desired state, and understood that while `--cascade=orphan` can preserve running resources during advanced migrations or recovery scenarios, it is not the normal solution for changing an immutable Deployment selector.
 - ✅ Properly cleaned up Kubernetes resources, and understood why deletion cascades
 
 ---
@@ -978,6 +1080,7 @@ kubectl delete deployment mismatch-demo 2>/dev/null || true
 **`src/break-fix/02-immutable-selector-patch.yaml`:**
 
 First apply a working Deployment:
+
 ```yaml
 apiVersion: apps/v1
 kind: Deployment
@@ -997,19 +1100,35 @@ spec:
         - name: nginx
           image: nginx:1.30.4
 ```
+
 ```bash
 kubectl apply -f 02-immutable-selector-patch.yaml
 ```
 
 Now edit the file and try to change the selector on the already-existing
 Deployment:
+
 ```bash
 vi 02-immutable-selector-patch.yaml
 ```
-Find the line `app: immutable-demo` under `spec.selector.matchLabels`
+
+Find the line `app: immutable-demo` under:
+
+```yaml
+spec:
+  selector:
+    matchLabels:
+```
+
 (**not** the one under `spec.template.metadata.labels` — leave that one
-alone) and change its value to `app: immutable-demo-typo`. Save and exit
-(`:wq` in vi), then reapply:
+unchanged) and change its value to:
+
+```yaml
+app: immutable-demo-typo
+```
+
+Save and exit (`:wq` in `vi`), then reapply:
+
 ```bash
 kubectl apply -f 02-immutable-selector-patch.yaml
 ```
@@ -1017,24 +1136,48 @@ kubectl apply -f 02-immutable-selector-patch.yaml
 <details>
 <summary>Reveal answer — attempt diagnosis first</summary>
 
-**Cause:** `spec.selector` is immutable once a Deployment exists — this is
-the same immutability rule already introduced for Pods in
-`01-core-concepts`, applying here to a different field on a different
-object. The API rejects the whole update with a single, specific error:
-```
-The Deployment "immutable-demo" is invalid: spec.selector: Invalid value:
-v1.LabelSelector{MatchLabels:map[string]string{"app":"immutable-demo-typo"},
-MatchExpressions:[]v1.LabelSelectorRequirement(nil)}: field is immutable
-```
-Note there's only one error here, not two — even though the (unchanged)
-template label technically no longer matches the (attempted) new selector
-either, the immutability check on `spec.selector` itself is what the API
-server reports; it doesn't also separately flag the template/selector
-mismatch on top of it.
+**Cause:** `spec.selector` is immutable once a Deployment has been created.
+The selector defines the ownership relationship between the Deployment,
+its ReplicaSets, and its Pods. Allowing it to change after creation could
+make ownership ambiguous and potentially cause a controller to manage the
+wrong set of Pods.
 
-**Fix:** You cannot patch your way out of this — delete and recreate the Deployment with the corrected selector, or create a new Deployment under a new name and migrate traffic before deleting the old one.
+The API server rejects the update with a specific immutability error:
 
-**Cascade:** the existing Deployment, its ReplicaSet, and its Pods are all completely unaffected by the failed `apply` — they keep running exactly as they were. The trap is assuming a failed `apply` means something broke; here it means nothing changed at all.
+```
+The Deployment "immutable-demo" is invalid: 
+* spec.template.metadata.labels: Invalid value: {"app":"immutable-demo"}: `selector` does not match template `labels`
+* spec.selector: Invalid value: {"matchLabels":{"app":"immutable-demo-typo"}}: field is immutable
+```
+
+Note there is only one error here, not two. Although the attempted selector
+change would also make the selector inconsistent with the existing
+`spec.template.metadata.labels`, the API server stops at the immutable
+field validation and reports the selector immutability violation.
+
+**Fix:** You cannot patch your way out of this. Once a Deployment selector
+exists, it cannot be modified. The available approaches are:
+
+1. Delete and recreate the Deployment with the corrected selector.
+2. Create a new Deployment with the desired selector and migrate traffic
+   from the old Deployment before removing it.
+
+For production workloads where downtime must be avoided, the second
+approach is usually preferred: run the new Deployment alongside the old
+one, validate it, and gradually move traffic using Kubernetes deployment
+and service migration patterns.
+
+`kubectl delete deployment <name> --cascade=orphan` is **not a general
+solution for changing an immutable selector**. It is an advanced
+ownership-preservation mechanism that removes the parent object while
+leaving child resources (such as ReplicaSets or Pods) running. It is mainly
+useful for recovery scenarios, controller migrations, or transferring
+ownership of existing resources.
+
+**Cascade:** the failed `apply` does not modify anything. The existing
+Deployment, its ReplicaSet, and its Pods remain exactly as they were.
+A rejected update means Kubernetes refused the requested change; it does
+not partially apply the invalid configuration.
 
 </details>
 
@@ -1042,6 +1185,45 @@ mismatch on top of it.
 ```bash
 kubectl delete deployment immutable-demo 2>/dev/null || true
 ```
+
+---
+
+### Error-3
+
+```bash
+# Assumes nginx-deploy from the main lab is running with 3 replicas
+kubectl get rs -l app=nginx
+# note the ReplicaSet's name, then bypass the Deployment entirely:
+kubectl scale replicaset <replicaset-name> --replicas=1
+kubectl get pods -w
+```
+
+<details>
+<summary>Reveal answer — attempt diagnosis first</summary>
+
+**Cause:** This isn't actually broken — it's the **Don't Manage a
+Deployment's ReplicaSet Directly** behavior from Concepts, observed live.
+For a few seconds, Pod count really does drop toward 1, as the ReplicaSet
+controller honors your manual `--replicas=1`. Then the *Deployment*
+controller notices the ReplicaSet's `spec.replicas` (1) no longer matches
+the Deployment's own `spec.replicas` (3), and reconciles it back — the
+ReplicaSet's count snaps back to 3, and the ReplicaSet controller
+recreates the Pods you just watched disappear.
+
+**Fix:** There's nothing to fix — this is expected, correct behavior. If
+you actually want 1 replica, `kubectl scale deployment nginx-deploy --replicas=1` is the right command; scaling the ReplicaSet directly was
+never going to stick.
+
+**Cascade:** briefly, real Pods really were deleted (not just a display
+glitch) — if this were a production Deployment mid-request, that's a
+real, if short, capacity dip. The trap isn't that anything is technically
+wrong; it's assuming the ReplicaSet is a safe, independent lever to pull
+when it's actually just a reconciliation target the Deployment controller
+is continuously re-asserting itself against.
+
+</details>
+
+**Cleanup:** none needed — the Deployment's own reconciliation already restored the correct state.
 
 ---
 
@@ -1054,7 +1236,7 @@ A: Creating pods directly means no self-healing, no easy scaling, and no update 
 A: The ReplicaSet controller, not the Deployment controller. The Deployment controller's job stops at creating and managing the ReplicaSet itself — it's the ReplicaSet controller, one level down, that watches Pod count and creates replacements.
 
 **Q: What is the pod-template-hash label actually for?**
-A: It's what lets a ReplicaSet's selector match *only* the Pods it created, even though the Deployment's own selector (like `app: nginx`) is broader and would otherwise match Pods from any ReplicaSet with that label. It's computed from the pod template, which is exactly why changing the template produces a new hash and therefore a new ReplicaSet — the mechanism `02-rolling-update-rollback` builds on.
+A: It's what lets a ReplicaSet's selector match *only* the Pods it created, even though the Deployment's own selector (like `app: nginx`) is broader and would otherwise match Pods from any ReplicaSet with that label. It's computed from the pod template, which is exactly why changing the template produces a new hash and therefore a new ReplicaSet — the mechanism `02-rolling-update-recreate` builds on.
 
 **Q: Can you have zero replicas?**
 A: Yes — `replicas: 0` deletes all Pods but keeps the Deployment object and its configuration intact. Useful for temporarily stopping an application without losing anything.
@@ -1067,6 +1249,9 @@ A: Only when you need `NotIn`, `Exists`, or `DoesNotExist` — none of which `ma
 
 **Q: How is `kubectl rollout restart` different from `kubectl scale`?**
 A: Scaling changes `spec.replicas` — how many Pods exist. `rollout restart` doesn't change the replica count or the pod template at all; it forces every existing Pod to be recreated (via the same rolling strategy) by patching a restart-timestamp annotation. Same ReplicaSet, same `pod-template-hash`, brand new Pod instances — useful for picking up a changed ConfigMap/Secret without editing the Deployment itself.
+
+**Q: If you manually `kubectl scale` a Deployment's ReplicaSet directly, does it stick?**
+A: No — the Deployment controller continuously reconciles the ReplicaSet's `spec.replicas` back to match the Deployment's own `spec.replicas`. Your change gets overwritten, typically within seconds. Always scale the Deployment, never its ReplicaSet.
 
 ---
 
@@ -1089,6 +1274,7 @@ A: Scaling changes `spec.replicas` — how many Pods exist. `rollout restart` do
 | Assuming the Deployment itself recreates deleted pods | It's the ReplicaSet controller, one level down — doesn't change what you type on the exam, but matters if a question asks you to reason about *why* something is happening |
 | Confusing `matchLabels` and `matchExpressions` syntax under time pressure | `matchExpressions` needs `key`/`operator`/`values` as a list of objects — a syntax slip here produces a schema validation error, not a silent misconfiguration |
 | Reaching for `kubectl scale` to force a fresh set of pods | Scaling doesn't recreate existing Pods, it only changes the count — `kubectl rollout restart` is the actual tool for "recreate everything, unchanged template" |
+| Scaling or editing a Deployment's ReplicaSet directly | Gets silently reconciled back by the Deployment controller within seconds — always act on the Deployment, never its ReplicaSet |
 
 ### Exam Task — Write it from scratch
 
@@ -1123,6 +1309,8 @@ kubectl get rs -l app=exam-nginx -o jsonpath='{.items[0].spec.selector}'
 | Owner references are what make deletion cascade | Deleting a Deployment cascades to its ReplicaSet and Pods because each one declares the level above as its owner |
 | Scaling only ever changes `spec.replicas` | The Deployment copies the number to the ReplicaSet; the ReplicaSet controller does the actual Pod creation/deletion |
 | `rollout restart` ≠ scaling | Forces every Pod to be recreated with an unchanged template and unchanged `pod-template-hash` — a different operation from changing replica count |
+| A Deployment-owned ReplicaSet isn't a safe second control surface | The Deployment controller reconciles any manual scale/edit on it back to match the Deployment's own spec within seconds |
+| `--cascade=orphan` is not the zero-downtime alternative to delete-and-recreate | It just Orphans the ReplicaSet/Pods instead of deleting them |
 | Everything about Pod creation from `01-core-concepts` still applies unchanged | A Deployment being three levels up the ownership chain doesn't change scheduling, admission control, or how kubelet/the container runtime create the container |
 
 ---
@@ -1145,6 +1333,8 @@ kubectl get rs -l app=exam-nginx -o jsonpath='{.items[0].spec.selector}'
 | `kubectl delete deployment <name>` | Delete deployment and all its pods |
 | `kubectl delete -f 01-nginx-deploy.yaml` | Delete resources defined in file |
 | `kubectl get pods -w` | Watch pods in real-time (Ctrl+C to exit) |
+| `kubectl describe rs <name>` | Full ReplicaSet detail including owner reference and desired/max-replicas annotations — see Step 3 |
+| `kubectl delete deployment <name> --cascade=orphan` | Delete only the Deployment, leaving its Pods running orphaned — see Working Around an Immutable Selector |
 
 ### Generating YAML skeletons with --dry-run
 
@@ -1215,6 +1405,8 @@ Confirm the Deployment's desired count actually matches what got propagated to t
 "Can kubectl logs and kubectl exec target a Deployment directly instead of a specific pod?","Yes — kubectl resolves deployment/name to the ReplicaSet and picks one arbitrary pod from it; useful when you don't care which specific replica, but not for comparing or isolating one pod","demo01-deployments,debugging,ckad-application-observability-maintenance"
 "Which namespace does the built-in service/kubernetes ClusterIP actually live in?","Only the default namespace — it's not present cluster-wide or in every namespace's kubectl get all output","demo01-deployments,kubectl-get-all,cka-cluster-architecture-installation-configuration"
 "How does kubectl rollout restart differ from kubectl scale?","rollout restart recreates every existing pod with the same template (same pod-template-hash) via a restart-timestamp annotation; scale only changes the replica count, it never recreates existing pods","demo01-deployments,rollout,ckad-application-deployment"
+"If you kubectl scale a Deployment's ReplicaSet directly, does it stick?","No — the Deployment controller reconciles the ReplicaSet's spec.replicas back to match the Deployment's own spec.replicas, typically within seconds","demo01-deployments,replicaset-ownership,cka-workloads-scheduling"
+"What do the deployment.kubernetes.io/desired-replicas and max-replicas annotations on a ReplicaSet tell you?","They're written by the Deployment controller, not you — max-replicas is spec.replicas plus the rounded-up maxSurge, the same number behind RollingUpdateStrategy's defaults","demo01-deployments,replicaset-ownership,cka-workloads-scheduling"
 ````
 
 ---
@@ -1465,11 +1657,62 @@ Trap: C reverses the two operations' actual behavior.
 
 </details>
 
+---
+
+**Q15. You run `kubectl scale replicaset nginx-deploy-85f7d4dd78 --replicas=1` directly. What happens?**
+
+- A) It stays at 1 replica permanently
+- B) The Deployment controller reconciles it back to match the Deployment's own `spec.replicas` within seconds
+- C) The Deployment is deleted
+- D) It's rejected outright — you can't scale a ReplicaSet directly
+
+<details>
+<summary>Answer</summary>
+
+**B** — The ReplicaSet controller briefly honors your value, but the Deployment controller notices the mismatch against its own `spec.replicas` and reconciles it back.
+Trap: D assumes a hard restriction that doesn't exist — the command succeeds, it just doesn't stick.
+
+</details>
+
+---
+
+**Q16. What do the `deployment.kubernetes.io/desired-replicas` and `max-replicas` annotations on a ReplicaSet represent?**
+
+- A) Values you're expected to set yourself in the ReplicaSet's YAML
+- B) Values written by the Deployment controller — `max-replicas` includes the rounded-up `maxSurge`
+- C) The ReplicaSet's own internal scaling limits, unrelated to any Deployment
+- D) Historical values from the ReplicaSet's very first revision only
+
+<details>
+<summary>Answer</summary>
+
+**B** — Visible via `kubectl describe rs`, these are the Deployment controller's own bookkeeping on the ReplicaSet it owns — `max-replicas` is exactly why `describe deployment`'s `RollingUpdateStrategy` percentages translate into a concrete extra Pod.
+Trap: A assumes these are user-configurable fields — they aren't, they're controller-written.
+
+</details>
+
+---
+
+**Q17. What does `kubectl delete deployment nginx-deploy --cascade=orphan` do differently from a plain `kubectl delete deployment nginx-deploy`?**
+
+- A) Nothing — they're identical
+- B) It deletes only the Deployment object, leaving the ReplicaSet and Pods running orphaned instead of cascading the delete to them
+- C) It deletes the Deployment and ReplicaSet, but keeps the Pods' data in a PersistentVolume
+- D) It pauses the Deployment instead of deleting it
+
+<details>
+<summary>Answer</summary>
+
+**B** — A plain delete cascades via owner references (per `01-basic-deployment`'s End-to-End section) all the way down to the Pods; `--cascade=orphan` deletes only the top object, leaving everything below it running with no owner.
+Trap: A ignores that this flag exists specifically to change cascade behavior — it wouldn't be documented separately if it behaved identically.
+
+</details>
+
 Score guide:
 | Score | Action |
 |---|---|
-| 13-14/14 | Import Anki cards, move to next Demo |
-| 10-12/14 | Review the wrong answers, then proceed |
-| 8-9/14 | Re-read the relevant section, retry those questions |
-| Below 8/14 | Re-read the full demo and redo the walkthrough before proceeding |
+| 15-17/17 | Import Anki cards, move to next Demo |
+| 12-14/17 | Review the wrong answers, then proceed |
+| 9-11/17 | Re-read the relevant section, retry those questions |
+| Below 9/17 | Re-read the full demo and redo the walkthrough before proceeding |
 ````

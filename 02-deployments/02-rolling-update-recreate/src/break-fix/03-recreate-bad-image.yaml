@@ -1,17 +1,19 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: immutable-demo
+  name: recreate-stall-demo
 spec:
-  replicas: 1
+  replicas: 3
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
-      app: immutable-demo-typo
+      app: recreate-stall-demo
   template:
     metadata:
       labels:
-        app: immutable-demo
+        app: recreate-stall-demo
     spec:
       containers:
         - name: nginx
-          image: nginx:1.30.4
+          image: nginx:1.28.3

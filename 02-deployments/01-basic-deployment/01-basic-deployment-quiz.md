@@ -239,10 +239,61 @@ Trap: C reverses the two operations' actual behavior.
 
 </details>
 
+---
+
+**Q15. You run `kubectl scale replicaset nginx-deploy-85f7d4dd78 --replicas=1` directly. What happens?**
+
+- A) It stays at 1 replica permanently
+- B) The Deployment controller reconciles it back to match the Deployment's own `spec.replicas` within seconds
+- C) The Deployment is deleted
+- D) It's rejected outright — you can't scale a ReplicaSet directly
+
+<details>
+<summary>Answer</summary>
+
+**B** — The ReplicaSet controller briefly honors your value, but the Deployment controller notices the mismatch against its own `spec.replicas` and reconciles it back.
+Trap: D assumes a hard restriction that doesn't exist — the command succeeds, it just doesn't stick.
+
+</details>
+
+---
+
+**Q16. What do the `deployment.kubernetes.io/desired-replicas` and `max-replicas` annotations on a ReplicaSet represent?**
+
+- A) Values you're expected to set yourself in the ReplicaSet's YAML
+- B) Values written by the Deployment controller — `max-replicas` includes the rounded-up `maxSurge`
+- C) The ReplicaSet's own internal scaling limits, unrelated to any Deployment
+- D) Historical values from the ReplicaSet's very first revision only
+
+<details>
+<summary>Answer</summary>
+
+**B** — Visible via `kubectl describe rs`, these are the Deployment controller's own bookkeeping on the ReplicaSet it owns — `max-replicas` is exactly why `describe deployment`'s `RollingUpdateStrategy` percentages translate into a concrete extra Pod.
+Trap: A assumes these are user-configurable fields — they aren't, they're controller-written.
+
+</details>
+
+---
+
+**Q17. What does `kubectl delete deployment nginx-deploy --cascade=orphan` do differently from a plain `kubectl delete deployment nginx-deploy`?**
+
+- A) Nothing — they're identical
+- B) It deletes only the Deployment object, leaving the ReplicaSet and Pods running orphaned instead of cascading the delete to them
+- C) It deletes the Deployment and ReplicaSet, but keeps the Pods' data in a PersistentVolume
+- D) It pauses the Deployment instead of deleting it
+
+<details>
+<summary>Answer</summary>
+
+**B** — A plain delete cascades via owner references (per `01-basic-deployment`'s End-to-End section) all the way down to the Pods; `--cascade=orphan` deletes only the top object, leaving everything below it running with no owner.
+Trap: A ignores that this flag exists specifically to change cascade behavior — it wouldn't be documented separately if it behaved identically.
+
+</details>
+
 Score guide:
 | Score | Action |
 |---|---|
-| 13-14/14 | Import Anki cards, move to next Demo |
-| 10-12/14 | Review the wrong answers, then proceed |
-| 8-9/14 | Re-read the relevant section, retry those questions |
-| Below 8/14 | Re-read the full demo and redo the walkthrough before proceeding |
+| 15-17/17 | Import Anki cards, move to next Demo |
+| 12-14/17 | Review the wrong answers, then proceed |
+| 9-11/17 | Re-read the relevant section, retry those questions |
+| Below 9/17 | Re-read the full demo and redo the walkthrough before proceeding |
