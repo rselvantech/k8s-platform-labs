@@ -1,0 +1,16 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: pod-exec-only
+  namespace: ops
+rules:
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["get"]
+- apiGroups: [""]
+  resources: ["pods/exec"]
+  verbs: ["create"]
+- apiGroups: ["apps"]
+  resources: ["deployments"]      # BUG: kubectl run creates a bare Pod,
+  verbs: ["create"]               # never a Deployment — this rule grants
+                                   # the wrong resource entirely for that command

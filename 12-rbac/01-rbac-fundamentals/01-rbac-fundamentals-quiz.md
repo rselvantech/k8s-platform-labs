@@ -30,8 +30,7 @@ Trap: A is wrong because this only happens when the RoleBinding's namespace does
 <details>
 <summary>Answer</summary>
 
-**C** — Unlike a typo'd Role name (which applies silently, per Q1), a cross-namespace reference is caught immediately at apply time, because the lookup for `roleRef` only searches the RoleBinding's own namespace — a same-named Role elsewhere is invisible to it.
-Trap: B is the tempting answer because it feels consistent with Q1's "silent failure" pattern, but the two failure modes are genuinely different — same-namespace-wrong-name fails silently; wrong-namespace-correct-name fails loudly. D is not real Kubernetes behavior.
+**B** — A RoleBinding can reference only a Role in its own namespace. The API server does not verify that the referenced Role exists when the RoleBinding is created, so kubectl apply succeeds. Later, during authorization, the RBAC authorizer looks for the referenced Role only in the RoleBinding's namespace. Since the Role exists only in ci, no matching Role is found and the binding grants no permissions. This is effectively the same outcome as a typo in roleRef.name: the binding exists, but it is non-functional until the referenced Role exists in the same namespace.
 
 </details>
 
