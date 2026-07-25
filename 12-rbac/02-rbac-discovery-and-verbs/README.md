@@ -735,10 +735,10 @@ pods                                            []                  []          
                                                 [/version]          []               [get]
                                                 [/version]          []               [get]
 ```
-
+```
 # Observation: pods/exec [create] IS NOT listed here, confirming the grant genuinely
 # does not exist at the RBAC layer. 
-
+```
 <details>
 <summary>Reveal answer — attempt diagnosis first</summary>
 
