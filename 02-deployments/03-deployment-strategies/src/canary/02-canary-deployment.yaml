@@ -1,0 +1,26 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nginx-canary
+  labels:
+    app: nginx
+spec:
+  replicas: 1           # Canary starts with fewer pods (10-20% traffic)
+  selector:
+    matchLabels:
+      app: nginx
+      track: canary
+  template:
+    metadata:
+      labels:
+        app: nginx
+        track: canary    # Canary label
+    spec:
+      containers:
+      - name: app
+        image: hashicorp/http-echo:latest
+        args:
+          - "-text=CANARY VERSION - v2.0-beta"
+          - "-listen=:5678"
+        ports:
+        - containerPort: 5678

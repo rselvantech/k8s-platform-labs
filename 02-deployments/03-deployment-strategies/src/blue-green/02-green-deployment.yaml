@@ -1,0 +1,26 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nginx-green
+  labels:
+    app: nginx
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: nginx
+      version: green
+  template:
+    metadata:
+      labels:
+        app: nginx
+        version: green     # Green label
+    spec:
+      containers:
+      - name: app
+        image: hashicorp/http-echo:latest
+        args:
+          - "-text=GREEN VERSION - v2.0"
+          - "-listen=:5678"
+        ports:
+        - containerPort: 5678

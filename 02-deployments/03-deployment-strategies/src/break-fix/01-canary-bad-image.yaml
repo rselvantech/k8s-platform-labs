@@ -1,0 +1,25 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nginx-canary
+  labels:
+    app: nginx
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: nginx
+      track: canary
+  template:
+    metadata:
+      labels:
+        app: nginx
+        track: canary
+    spec:
+      containers:
+      - name: app
+        image: hashicorp/http-echo:99.99.99-does-not-exist   # doesn't exist
+        args:
+          - "-text=CANARY VERSION - v2.0-beta"
+        ports:
+        - containerPort: 5678
