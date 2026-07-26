@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: other-config
+  namespace: ci
+data:
+  unrelated-setting: "true"
