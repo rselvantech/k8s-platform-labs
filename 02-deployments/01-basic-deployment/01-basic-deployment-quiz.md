@@ -3,205 +3,206 @@
 > One correct answer per question unless stated otherwise.
 > Target: 80% or above before moving to next Demo.
 
-**Q1. Does a Deployment ever create or delete a Pod directly?**
 
-- A) Yes, it manages Pods directly with no intermediate object
-- B) No — it manages a ReplicaSet, which manages Pods
-- C) Only during a rolling update
-- D) Only when replicas is set to 0
+**Q1. `kubectl get deploy --show-labels` shows `<none>` for `nginx-deploy` even though every Pod clearly has labels. Why?**
+
+- A) Labels only ever apply to Pods, never to Deployments
+- B) `metadata.labels` (the Deployment's own labels) and `spec.template.metadata.labels` (the Pod's labels) are two separate fields, and this YAML never set the former
+- C) This is a display bug in `--show-labels`
+- D) Deployment labels are hidden by default and need `-o wide`
 
 <details>
 <summary>Answer</summary>
 
-**B** — It's a strict two-hop chain of command: Deployment → ReplicaSet → Pod, each level reconciling only its own tier.
-Trap: A is the common oversimplified mental model that this demo specifically corrects.
+**B** — `kubectl apply -f` never sets labels on the Deployment object itself unless you put them in the YAML's own `metadata.labels`, which this demo's manifest doesn't.
+Trap: A overgeneralizes — Deployments absolutely can carry their own labels, this one just doesn't.
 
 </details>
 
 ---
 
-**Q2. What is `pod-template-hash` and where does it come from?**
+**Q2. Raising `spec.minReadySeconds` above its default of 0 changes what, exactly?**
 
-- A) A random UUID assigned at cluster install time
-- B) A hash computed from the pod template, added to the ReplicaSet's name, selector, and Pods
-- C) A checksum of the container image
-- D) The Deployment's own resourceVersion
+- A) How long the scheduler waits before assigning a node
+- B) How long a newly created Pod must stay Ready before it counts as available
+- C) How long `kubectl apply` blocks before returning
+- D) The ReplicaSet's reconciliation interval
 
 <details>
 <summary>Answer</summary>
 
-**B** — It's derived from `spec.template`, which is exactly why changing the template produces a new hash and a new ReplicaSet.
-Trap: C confuses this with image content — it has nothing to do with the image itself, only the pod template as a whole.
+**B** — It's a soak period per Pod, useful when a Pod can pass its readiness probe before it's genuinely warmed up.
+Trap: A confuses this with scheduling, which happens well before this field ever comes into play.
 
 </details>
 
 ---
 
-**Q3. Which controller actually recreates a manually deleted pod under a Deployment?**
+**Q3. If a rollout genuinely never progresses for the full `progressDeadlineSeconds` window (default 600s), what actually happens?**
 
-- A) The Deployment controller
-- B) The ReplicaSet controller
-- C) kube-scheduler
-- D) kubelet
+- A) The Deployment automatically rolls back to the previous ReplicaSet
+- B) The Deployment's `Conditions` reports it as failed to progress — nothing is reverted or halted automatically
+- C) All Pods are force-deleted and recreated
+- D) `kubectl apply` starts refusing further changes
 
 <details>
 <summary>Answer</summary>
 
-**B** — The ReplicaSet controller is the one watching actual Pod count against `spec.replicas` and reconciling the difference.
-Trap: A is the common but imprecise "the Deployment self-heals" framing — technically it's one level down.
+**B** — This field is a stuck-rollout *detector*, not an automatic remediation — it only changes what `kubectl describe` reports in `Conditions`.
+Trap: A assumes automatic rollback, which isn't what this field does at all.
 
 </details>
 
 ---
 
-**Q4. When would you actually need `matchExpressions` instead of `matchLabels`?**
+**Q4. What capability does `kubectl.kubernetes.io/last-applied-configuration` actually give `kubectl apply` that `create`/`replace` don't have?**
 
-- A) Whenever you have more than one label
-- B) Only when you need NotIn, Exists, or DoesNotExist
-- C) matchExpressions is always required for Deployments
-- D) Never — matchLabels can express everything matchExpressions can
+- A) The ability to compute a proper 3-way diff on the next `apply`, instead of blindly overwriting
+- B) Faster reconciliation
+- C) Automatic rollback on failure
+- D) It's purely cosmetic, shown only in `-o yaml`
 
 <details>
 <summary>Answer</summary>
 
-**B** — Those three operators have no `matchLabels` equivalent at all; a plain equality match should just use `matchLabels`.
-Trap: D overcorrects — `matchExpressions` genuinely can express things `matchLabels` cannot, it's just unnecessary for simple cases.
+**A** — It stores exactly what you last applied, which is what lets the next `apply` compare stored-vs-live-vs-new rather than overwrite wholesale.
+Trap: D dismisses a field that has real functional purpose, not just display value.
 
 </details>
 
 ---
 
-**Q5. Can you change `spec.selector` on an existing Deployment with `kubectl apply`?**
+**Q5. `generation` is `6` and `status.observedGeneration` is also `6` on this Deployment. What does that tell you?**
 
-- A) Yes, it updates immediately
-- B) No — it's immutable; the only fix is delete and recreate
-- C) Yes, but only if replicas is 0
-- D) Yes, but it requires `--force`
+- A) The Deployment has been updated 6 times and rolled back once
+- B) The controller has fully processed the latest spec change — a mismatch would mean it's behind or stuck
+- C) There are 6 ReplicaSets currently active
+- D) 6 Pods have been created in this Deployment's lifetime
 
 <details>
 <summary>Answer</summary>
 
-**B** — Same immutability rule already seen on certain Pod fields, applied here to a different object's field.
-Trap: C invents a workaround condition that doesn't exist — immutability isn't conditional on replica count.
+**B** — `generation` increments on every `spec` change; `observedGeneration` catching up to it means the controller is caught up. A persistent gap between them is the actual signal to watch for.
+Trap: C and D both invent unrelated meanings for a number that's really just a spec-change counter.
 
 </details>
 
 ---
 
-**Q6. What mechanism makes deleting a Deployment cascade to its ReplicaSet and Pods automatically?**
+**Q6. What is `resourceVersion` actually for, and should you ever set it yourself?**
 
-- A) A hardcoded cleanup script in kube-controller-manager
-- B) Owner references
-- C) The pod-template-hash label
-- D) Finalizers on the Deployment object itself
+- A) It's etcd's internal version counter for optimistic concurrency control — you never set it yourself
+- B) It's a user-facing version tag for your own release tracking
+- C) It increments only when Pods are added or removed
+- D) It's required in every YAML manifest before `apply`
 
 <details>
 <summary>Answer</summary>
 
-**B** — Each ReplicaSet declares its Deployment as owner, and each Pod declares its ReplicaSet as owner; Kubernetes' garbage collector uses these to cascade deletes.
-Trap: C is a real, related mechanism but doesn't drive deletion — it's used for selector precision, not ownership/GC.
+**A** — It exists so two simultaneous updates to the same object can't silently clobber each other; it's entirely internal bookkeeping.
+Trap: B mistakes it for something meant for humans to read meaning into, which it isn't.
 
 </details>
 
 ---
 
-**Q7. What does `kubectl scale deployment nginx --replicas=5` actually modify?**
+**Q7. You delete `nginx-deploy` and immediately recreate a Deployment with the exact same name. Does it get the same `uid`?**
 
-- A) It directly creates 5 pods itself
-- B) Only the Deployment's `spec.replicas` — the ReplicaSet controller does the actual Pod work
-- C) It modifies the ReplicaSet's pod-template-hash
-- D) It triggers a rolling update
+- A) Yes, `uid` is derived from the name
+- B) No — `uid` is a new, cluster-wide unique identifier every time, regardless of name reuse
+- C) Only if you recreate it within the same `resourceVersion` window
+- D) Only if `revisionHistoryLimit` hasn't been exceeded
 
 <details>
 <summary>Answer</summary>
 
-**B** — Scaling never touches Pods directly; it's a one-field change that the Deployment controller propagates down to the ReplicaSet.
-Trap: D is wrong for this demo's scope — no template change occurred, so there's nothing for a rolling update to do.
+**B** — The name is not the real underlying identity; `uid` is, and a same-named recreated object gets a brand-new one.
+Trap: A assumes name and identity are the same thing, which this field specifically disproves.
 
 </details>
 
 ---
 
-**Q8. A Deployment's `spec.template.metadata.labels` doesn't satisfy `spec.selector`. What happens?**
+**Q8. In `kubectl describe deployment`, `Conditions` shows both `Available: True` and `Progressing: True`. Are these the same signal?**
 
-- A) The Deployment is created but manages zero pods
-- B) The apply is rejected outright with a schema validation error
-- C) Kubernetes automatically fixes the mismatched label
-- D) The ReplicaSet is created but stuck at 0 replicas forever
+- A) Yes, they always move together
+- B) No — `Available` reflects whether enough Pods are currently up; `Progressing` reflects whether the controller is making forward progress (or has stalled)
+- C) `Progressing` is only ever `True` during an active rolling update
+- D) `Available` is deprecated in favor of `Progressing`
 
 <details>
 <summary>Answer</summary>
 
-**B** — This fails immediately at `apply` time — one of the more catchable Kubernetes errors, provided you recognize the message shape.
-Trap: A and D both imagine a partial-success state that doesn't actually happen here — the whole object is rejected, nothing is created.
+**B** — Both being `True` here just means "healthy and stable," not "actively doing something" — they're independent health signals.
+Trap: C is a reasonable-sounding guess but wrong for this demo: both conditions are `True` even with nothing actively rolling out.
 
 </details>
 
 ---
 
-**Q9. Why does a Deployment use `apiVersion: apps/v1` instead of `v1` like a Pod?**
+**Q9. Is `kubectl edit deployment nginx-deploy` a separate reconciliation mechanism from `kubectl apply -f`?**
 
-- A) apps/v1 is just a newer, interchangeable name for v1
-- B) Core/foundational types use v1; controller types that manage other objects use the separate apps group
-- C) apiVersion doesn't actually matter, kubectl infers it from `kind`
-- D) apps/v1 is only used in production clusters
+- A) Yes, `edit` bypasses the normal controllers entirely
+- B) No — saving from `edit` sends the full modified object back to the API server as an update, and everything downstream is identical to any other write
+- C) `edit` only works on `spec.replicas`, nothing else
+- D) `edit` requires `--record` to actually persist changes
 
 <details>
 <summary>Answer</summary>
 
-**B** — Pod, Service, Namespace stay in the core `v1` group; Deployment, ReplicaSet, StatefulSet, DaemonSet live in the separate `apps` group since they're controllers managing other objects.
-Trap: C is wrong and dangerous to believe — getting `apiVersion` wrong produces a real schema-validation rejection, not silent inference.
+**B** — It's closer to `kubectl replace`'s semantics than `apply`'s 3-way merge, but it still goes through the same reconciliation path once saved.
+Trap: A imagines a special bypass path that doesn't exist — every write ends up in the same place.
 
 </details>
 
 ---
 
-**Q10. A pod is named `nginx-deploy-85f7d4dd78-29r6g`. What does the `29r6g` part represent?**
+**Q10. After scaling to 0 and back up to 3, does the Deployment create a brand-new ReplicaSet to bring the Pods back?**
 
-- A) The same pod-template-hash as `85f7d4dd78`, just truncated
-- B) A separate random suffix generated per-pod, purely for name uniqueness among siblings
-- C) The node the pod is scheduled on
-- D) A checksum of the container's image
+- A) Yes, scaling to 0 deletes the ReplicaSet along with the Pods
+- B) No — the same ReplicaSet (same `pod-template-hash`) is reused, since the pod template never changed
+- C) Only if `revisionHistoryLimit` allows it
+- D) A new ReplicaSet is created, but the old one is also kept as `OldReplicaSets`
 
 <details>
 <summary>Answer</summary>
 
-**B** — Every pod from the same ReplicaSet shares `85f7d4dd78` (the pod-template-hash) but gets its own distinct second suffix, which is what keeps sibling pod names unique.
-Trap: A conflates the two suffixes as if they were the same thing, which is exactly the confusion this section exists to clear up.
+**B** — Scaling never changes the pod template, so there's no new hash to compute — the existing ReplicaSet is just told to reconcile against a new number again.
+Trap: A confuses "zero Pods" with "the ReplicaSet object itself is gone," which isn't what scaling to 0 does.
 
 </details>
 
 ---
 
-**Q11. Does `kubectl get all` include ConfigMaps and Secrets in its output?**
+**Q11. This demo's YAML never sets `spec.strategy`, yet `kubectl describe` shows `RollingUpdateStrategy: 25% max unavailable, 25% max surge`. Where do these numbers come from?**
 
-- A) Yes, along with everything else in the namespace
-- B) No — it only covers a fixed set of common types like Pods, Services, Deployments, ReplicaSets
-- C) Only if `--all-namespaces` is added
-- D) Only ConfigMaps, not Secrets
+- A) They're hardcoded into every nginx image
+- B) They're the API server's own default values, applied because `spec.strategy` was never set
+- C) They only appear after the first `kubectl edit`
+- D) minikube sets them at cluster install time
 
 <details>
 <summary>Answer</summary>
 
-**B** — "all" is narrower than it sounds; ConfigMaps, Secrets, Ingress, PVCs, and any CRD-based object all need to be queried separately.
-Trap: A is the natural but incorrect assumption the command's name invites.
+**B** — Same API-server-side defaulting behavior that fills in `progressDeadlineSeconds` and `revisionHistoryLimit` even when your YAML never mentions them.
+Trap: D invents a cluster-level explanation for something that's actually just object-level defaulting, unrelated to minikube specifically.
 
 </details>
 
 ---
 
-**Q12. Can `kubectl exec deployment/nginx-deploy -- <cmd>` run without naming a specific pod?**
+**Q12. `kubectl describe deployment` shows `OldReplicaSets: <none>` in this demo. Under what circumstance would that field start showing an actual ReplicaSet instead?**
 
-- A) No — Deployments don't support exec at all
-- B) Yes — kubectl resolves it to the ReplicaSet and picks one arbitrary pod
-- C) Yes, but it runs the command on every pod simultaneously
-- D) Only if the Deployment has exactly one replica
+- A) After scaling up past the original replica count
+- B) After the pod template changes, producing a new `pod-template-hash` and therefore a new ReplicaSet — the old one sticks around at 0 replicas
+- C) After `kubectl edit` is used instead of `kubectl apply`
+- D) After more than 3 replicas exist simultaneously
 
 <details>
 <summary>Answer</summary>
 
-**B** — Convenient when you don't care which specific replica, but it's still just one pod, not all of them — the same resolution pattern already seen with `kubectl port-forward deployment/...`.
-Trap: C assumes fan-out behavior that doesn't exist — it's always exactly one pod, chosen arbitrarily.
+**B** — This field only ever has content once there's a template change to compare against — exactly the mechanism `02-rolling-update-recreate` builds on, just not yet exercised in this demo.
+Trap: A and D both assume replica *count* changes are what populate this field, when it's actually template changes (and therefore hash changes) that do.
 
 </details>
 
@@ -291,6 +292,7 @@ Trap: A ignores that this flag exists specifically to change cascade behavior �
 </details>
 
 Score guide:
+
 | Score | Action |
 |---|---|
 | 15-17/17 | Import Anki cards, move to next Demo |

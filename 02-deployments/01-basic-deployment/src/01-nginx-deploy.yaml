@@ -1,16 +1,16 @@
-apiVersion: apps/v1
+apiVersion: apps/v1        # "apps" group, not core "v1" — see apiVersion: why apps/v1? above
 kind: Deployment
 metadata:
-  name: nginx-deploy
+  name: nginx-deploy        # prefixes the ReplicaSet name, which prefixes every Pod name
 spec:
-  replicas: 3
+  replicas: 3                # desired Pod count — the ReplicaSet controller reconciles against this
   selector:
     matchLabels:
-      app: nginx
+      app: nginx              # must exactly match template.metadata.labels below
   template:
     metadata:
       labels:
-        app: nginx
+        app: nginx            # stamped onto every Pod created from this template
     spec:
       containers:
         - name: nginx
