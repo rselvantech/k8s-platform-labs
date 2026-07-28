@@ -7,6 +7,6 @@ spec:
   selector:
     app: backend
   ports:
-    - port: 9090        # service listens on 9090
-      targetPort: 5678  # container listens on 5678
+    - port: 9090 # service listens on 9090
+      targetPort: 5678 # container listens on 5678
       protocol: TCP

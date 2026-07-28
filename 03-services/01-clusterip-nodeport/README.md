@@ -12,7 +12,7 @@ This demo builds a realistic two-tier web application:
 
 ```
 User → NodePort (frontend-svc:31000)
-         → ClusterIP (frontend pods: nginx)
+         → ClusterIP (frontend pods: hashicorp/http-echo)
            → ClusterIP (backend-svc:9090)
              → ClusterIP (backend pods: hashicorp/http-echo)
 ```
@@ -28,6 +28,7 @@ this same chapter, and forward-referenced at the relevant points below,
 rather than repeated here.
 
 **What this lab covers:**
+
 - Why Services exist — stable IP and DNS for ephemeral pods
 - ClusterIP — internal pod-to-pod communication
 - Service fields — port, targetPort, selector, type
@@ -43,6 +44,7 @@ rather than repeated here.
 ## Prerequisites
 
 **Required:**
+
 - Minikube `3node` profile — 1 control plane + 2 workers
 - kubectl configured for `3node`
 - Completion of `01-core-concepts` and `02-deployments` (this demo assumes you already understand Pods, Deployments, and labels/selectors — none of that is re-explained here)
@@ -62,6 +64,7 @@ point, no separate prior demo is required to have done it first.
 ## Lab Objectives
 
 By the end of this lab, you will be able to:
+
 1. ✅ Create a ClusterIP service and verify it selects the correct pods
 2. ✅ Verify internal pod-to-pod communication via ClusterIP
 3. ✅ Observe DNS resolution of service names inside a pod
@@ -78,7 +81,7 @@ By the end of this lab, you will be able to:
 ├── src/
 │   ├── 01-backend-deployment.yaml      # hashicorp/http-echo — 3 replicas
 │   ├── 02-backend-svc-clusterip.yaml   # ClusterIP service for backend
-│   ├── 03-frontend-deployment.yaml     # nginx:1.27 — 3 replicas
+│   ├── 03-frontend-deployment.yaml     # hashicorp/http-echo — 3 replicas
 │   ├── 04-frontend-svc-nodeport.yaml   # NodePort service for frontend
 │   └── break-fix/
 │       ├── 01-selector-typo.yaml            # Embedded inline in README — not generated on disk
@@ -93,15 +96,15 @@ By the end of this lab, you will be able to:
 
 Answer from memory before continuing — no peeking at the previous demo.
 
-1. What makes a Service's Endpoints list update instantly when you change its selector?
-2. Does a pod that matches a Service's selector but isn't Ready receive traffic?
-3. Why is Canary traffic split only approximate?
+1. Does relabeling a canary Deployment's `metadata.labels` to say `track: stable` actually promote it?
+2. What's the real resource cost of Blue-Green's "instant rollback" capability?
+3. Why is Canary traffic split only approximate, not an exact percentage?
 
 <details>
 <summary>Answers</summary>
 
-1. Kubernetes continuously recomputes Endpoints from the selector against currently Ready, matching pods.
-2. No — only Ready pods become Endpoints, regardless of label match.
+1. No — it only changes the Deployment object's own bookkeeping label. `spec.selector` and `spec.template.metadata.labels` are immutable, so the Pods it manages keep their real labels unchanged, and nothing about Service routing changes either.
+2. Running two full production-sized environments simultaneously — roughly 2x the compute cost for however long both versions coexist.
 3. It's driven by pod-count ratio and round-robin load balancing, not a guaranteed percentage.
 
 </details>
@@ -123,6 +126,8 @@ With Service:
   backend pod restarts → Service automatically updates endpoints
   frontend works → always reaches a healthy backend pod
 ```
+
+---
 
 ### Service Fields
 
@@ -171,6 +176,8 @@ mechanics are covered in 02-service-internals). Add a pod → it joins.
 Delete a pod → it leaves. No manual endpoint management needed.
 ```
 
+---
+
 ### Service Types — Nested Design
 
 The `type` field in the Service API is designed as nested functionality — each level adds to the previous.
@@ -192,6 +199,8 @@ LoadBalancer → cloud provider external IP
                cloud-provider-backed cluster — not applicable to
                this minikube-based series)
 ```
+
+---
 
 ### ClusterIP — Internal Communication
 
@@ -217,6 +226,8 @@ subject of a dedicated demo later in this chapter:
 `05-service-discovery` for the DNS resolution mechanics. This demo shows
 you both working, without going deep into either yet.
 
+---
+
 ### NodePort — External Access
 
 If you set the type field to NodePort, the Kubernetes control plane allocates a port from a range specified by the `--service-node-port-range` flag (default: 30000-32767). Each node proxies that port (the same port number on every Node) into your Service.
@@ -237,6 +248,8 @@ Container port 80 receives the request
 and ephemeral ports (typically 32768+). It keeps NodePort traffic
 clearly identifiable and avoids conflicts with OS-assigned ports.
 
+---
+
 ### TPS — Memory Aid for Service Spec Fields
 
 ```
@@ -251,7 +264,20 @@ S → selector   (matchLabels — which pods this service routes to)
 
 ## Lab Step-by-Step Guide
 
+By the end of this walkthrough you'll have a working two-tier
+application: a `backend` Deployment (3 replicas) reachable only inside
+the cluster via a **ClusterIP** Service, and a `frontend` Deployment
+(3 replicas) reachable from outside the cluster via a **NodePort**
+Service — with the frontend calling the backend internally by DNS name.
+Steps 1–4 build that; Steps 5–8 verify and observe it working (DNS,
+load balancing, self-updating endpoints); Step 9 rebuilds the same
+Services imperatively for exam practice; Step 10 tears everything down.
+
 ### Step 1: Cluster Setup
+
+Before deploying anything, confirm the cluster is in the expected state
+this whole demo assumes — three Ready nodes, with the control plane
+tainted so workload pods land only on the two workers.
 
 ```bash
 cd 03-services/01-clusterip-nodeport/src
@@ -260,6 +286,7 @@ kubectl get nodes
 ```
 
 **Expected output:**
+
 ```
 NAME        STATUS   ROLES           AGE   VERSION
 3node       Ready    control-plane   ...   v1.34.0
@@ -274,11 +301,13 @@ kubectl describe node 3node | grep Taints
 ```
 
 **Expected output:**
+
 ```
 Taints: node-role.kubernetes.io/control-plane:NoSchedule
 ```
 
 If not tainted:
+
 ```bash
 kubectl taint nodes 3node node-role.kubernetes.io/control-plane:NoSchedule
 ```
@@ -287,11 +316,19 @@ kubectl taint nodes 3node node-role.kubernetes.io/control-plane:NoSchedule
 
 ### Step 2: Deploy Backend — hashicorp/http-echo
 
-`hashicorp/http-echo` is a lightweight in-memory web server that echoes
-back whatever text you configure via `--text` argument. Perfect for
-demonstrating which pod answered a request.
+This step creates the backend tier — 3 replicas, not yet reachable by
+anything since no Service exists for them yet (that's Step 3).
 
-**01-backend-deployment.yaml:**
+#### Backend Deployment
+
+`hashicorp/http-echo` is a lightweight in-memory web server that echoes
+back whatever text you configure via `-text`. The `$(MY_POD_NAME)`
+Downward API injection (see the note below the manifest) is this
+demo's one notable addition — everything else here is standard
+Deployment shape already covered in `02-deployments`.
+
+**`01-backend-deployment.yaml`:**
+
 ```yaml
 apiVersion: apps/v1
 kind: Deployment
@@ -310,9 +347,14 @@ spec:
       terminationGracePeriodSeconds: 0
       containers:
         - name: backend
-          image: hashicorp/http-echo:0.2.3
+          image: hashicorp/http-echo:1.0.0
           args:
-            - "-text=Hello from backend"
+            - "-text=Hello from backend pod $(MY_POD_NAME)"
+          env:
+            - name: MY_POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
           ports:
             - containerPort: 5678
           resources:
@@ -324,6 +366,12 @@ spec:
               memory: "64Mi"
 ```
 
+> `$(MY_POD_NAME)` injects the pod's own name into the response text via
+> the Downward API — so which pod actually answered a request is visible
+> directly in the response, not just inferable from the fact that a
+> request succeeded. This makes the load-balancing you'll observe in
+> Step 5 and Step 7 genuinely visible, not just assumed.
+
 ```bash
 kubectl apply -f 01-backend-deployment.yaml
 kubectl rollout status deployment/backend-deploy
@@ -331,6 +379,7 @@ kubectl get pods -l app=backend -o wide
 ```
 
 **Expected output:**
+
 ```
 deployment.apps/backend-deploy successfully rolled out
 
@@ -341,11 +390,13 @@ backend-deploy-xxxxxxxxx-ccccc    1/1     Running   3node-m03
 ```
 
 Verify the app is working by checking pod logs:
+
 ```bash
 kubectl logs -l app=backend --tail=2
 ```
 
 **Expected output:**
+
 ```
 2026/... server is listening on :5678
 ```
@@ -354,7 +405,21 @@ kubectl logs -l app=backend --tail=2
 
 ### Step 3: Create ClusterIP Service for Backend
 
-**02-backend-svc-clusterip.yaml:**
+With backend pods running but nothing routing to them yet, this step
+creates the Service that gives them a stable internal address — the
+`backend-svc` that Steps 5 and beyond will call by name.
+
+#### Backend ClusterIP Service
+
+This Service spec gives the 3 backend pods a stable internal address,
+selecting them by their `app: backend` label and translating its own
+`port: 9090` to the container's actual `targetPort: 5678`. Nothing
+outside this step applies the file directly, but every later step that
+reaches the backend — Step 5's DNS/curl test, Step 7's load-balancing
+check — is calling through the Service this file creates.
+
+**`02-backend-svc-clusterip.yaml`:**
+
 ```yaml
 apiVersion: v1
 kind: Service
@@ -365,10 +430,18 @@ spec:
   selector:
     app: backend
   ports:
-    - port: 9090        # service listens on 9090
-      targetPort: 5678  # container listens on 5678
+    - port: 9090 # service listens on 9090
+      targetPort: 5678 # container listens on 5678
       protocol: TCP
 ```
+
+| Field                     | Required / Default                    | Description                                                                                                                               |
+| ------------------------- | ------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
+| `spec.type`               | No — defaults to `ClusterIP`          | Set explicitly here for clarity; omitting it has the identical effect                                                                     |
+| `spec.selector`           | Yes                                   | Which pods this Service routes to — matched against pod labels, not the Deployment object itself                                          |
+| `spec.ports[].port`       | Yes                                   | Port the Service itself listens on — what other pods/clients use to reach it                                                              |
+| `spec.ports[].targetPort` | No — defaults to same value as `port` | Port the container actually listens on; only needs to differ when the app's internal port differs from the Service's external-facing port |
+| `spec.ports[].protocol`   | No — defaults to `TCP`                | Set explicitly here for clarity                                                                                                           |
 
 ```bash
 kubectl apply -f 02-backend-svc-clusterip.yaml
@@ -376,6 +449,7 @@ kubectl get svc backend-svc
 ```
 
 **Expected output:**
+
 ```
 NAME          TYPE        CLUSTER-IP      EXTERNAL-IP   PORT(S)    AGE
 backend-svc   ClusterIP   10.96.xxx.xxx   <none>        9090/TCP   5s
@@ -388,11 +462,13 @@ CLUSTER-IP          → stable virtual IP — never changes
 ```
 
 Inspect the service in detail:
+
 ```bash
 kubectl describe svc backend-svc
 ```
 
 **Expected output:**
+
 ```
 Name:              backend-svc
 Namespace:         default
@@ -423,11 +499,13 @@ IP Family Policy / IP Families: SingleStack / IPv4
 ```
 
 Verify endpoints directly:
+
 ```bash
 kubectl get endpoints backend-svc
 ```
 
 **Expected output:**
+
 ```
 NAME          ENDPOINTS
 backend-svc   10.244.1.x:5678,10.244.1.x:5678,10.244.2.x:5678
@@ -435,15 +513,28 @@ backend-svc   10.244.1.x:5678,10.244.1.x:5678,10.244.2.x:5678
 
 > When a pod matching the selector is added or removed, the endpoints
 > list updates automatically — no manual changes needed. `kubectl get
-> endpoints` is the older, now-deprecated view of this data — the
+endpoints` is the older, now-deprecated view of this data — the
 > current API (`EndpointSlices`), why it replaced this one, and full
 > readiness-tracking detail are `02-service-internals`'s entire subject.
 
 ---
 
-### Step 4: Deploy Frontend — nginx
+### Step 4: Deploy Frontend
 
-**03-frontend-deployment.yaml:**
+With the backend fully reachable internally, this step adds the second
+tier — the frontend pods that will eventually be exposed externally in
+Step 6, and that call the backend by name in Step 5.
+
+#### Frontend Deployment
+
+Same `hashicorp/http-echo` + Downward API pattern as the backend, just
+listening on port 80 instead of the default 5678 (`-listen=:80`) — this
+demo is entirely about Service mechanics, not the applications behind
+them, so keeping both tiers on the same simple, distinguishable image
+keeps the focus there.
+
+**`03-frontend-deployment.yaml`:**
+
 ```yaml
 apiVersion: apps/v1
 kind: Deployment
@@ -462,7 +553,15 @@ spec:
       terminationGracePeriodSeconds: 0
       containers:
         - name: frontend
-          image: nginx:1.27
+          image: hashicorp/http-echo:1.0.0
+          args:
+            - "-listen=:80"
+            - "-text=Hello from frontend pod $(MY_POD_NAME)"
+          env:
+            - name: MY_POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
           ports:
             - containerPort: 80
           resources:
@@ -481,6 +580,7 @@ kubectl get pods -l app=frontend -o wide
 ```
 
 **Expected output:**
+
 ```
 deployment.apps/frontend-deploy successfully rolled out
 
@@ -494,7 +594,9 @@ frontend-deploy-xxxxxxxxx-ccccc    1/1     Running   3node-m03
 
 ### Step 5: Verify ClusterIP — Internal Connectivity
 
-Use `nicolaka/netshoot` — a production-grade network debug container
+This step proves the backend is actually reachable the way an
+application inside the cluster would reach it — by DNS name, not by IP
+— using `nicolaka/netshoot`, a production-grade network debug container
 with curl, dig, nslookup, ss, and more pre-installed.
 
 ```bash
@@ -506,19 +608,25 @@ kubectl run netshoot --image=nicolaka/netshoot \
 Inside the netshoot pod:
 
 **Test 1 — Reach backend by service name:**
+
 ```bash
 curl backend-svc:9090
 ```
+
 **Expected output:**
+
 ```
-Hello from backend
+Hello from backend pod backend-deploy-xxxxxxxxx-aaaaa
 ```
 
 **Test 2 — DNS resolution of service name:**
+
 ```bash
 nslookup backend-svc
 ```
+
 **Expected output:**
+
 ```
 Server:         10.96.0.10
 Address:        10.96.0.10#53
@@ -526,6 +634,7 @@ Address:        10.96.0.10#53
 Name:   backend-svc.default.svc.cluster.local
 Address: 10.96.xxx.xxx
 ```
+
 ```
 10.96.0.10 = CoreDNS service IP (kube-dns in kube-system namespace)
 backend-svc.default.svc.cluster.local = fully qualified DNS name
@@ -533,34 +642,42 @@ backend-svc.default.svc.cluster.local = fully qualified DNS name
 ```
 
 **Test 3 — Observe load balancing across pods:**
+
 ```bash
-for i in $(seq 1 6); do curl -s backend-svc:9090; done
+for i in $(seq 1 6); do curl -s backend-svc:9090; echo; done
 ```
-**Expected output:**
+
+**Expected output — different pod names across responses:**
+
 ```
-Hello from backend
-Hello from backend
-Hello from backend
-Hello from backend
-Hello from backend
-Hello from backend
+Hello from backend pod backend-deploy-xxxxxxxxx-aaaaa
+Hello from backend pod backend-deploy-xxxxxxxxx-bbbbb
+Hello from backend pod backend-deploy-xxxxxxxxx-aaaaa
+Hello from backend pod backend-deploy-xxxxxxxxx-ccccc
+Hello from backend pod backend-deploy-xxxxxxxxx-bbbbb
+Hello from backend pod backend-deploy-xxxxxxxxx-aaaaa
 ```
-> All responses say "Hello from backend" — every pod runs the identical
-> `-text` argument, so you can't tell which pod answered from this alone.
-> This is fine for this demo's purposes; `02-service-internals` uses a
-> per-pod-name variant of this same backend to make load balancing
-> visible per-response.
+
+> Load balancing is genuinely visible here, not just assumed — six
+> requests, landing across different pods, exactly the distribution
+> `backend-svc`'s Endpoints predict. `02-service-internals` builds on
+> this same technique to inspect the iptables mechanics actually
+> producing this distribution.
 
 **Test 4 — Check /etc/resolv.conf — how DNS works inside a pod:**
+
 ```bash
 cat /etc/resolv.conf
 ```
+
 **Expected output:**
+
 ```
 search default.svc.cluster.local svc.cluster.local cluster.local
 nameserver 10.96.0.10
 options ndots:5
 ```
+
 ```
 nameserver 10.96.0.10  → CoreDNS IP — all DNS queries go here
 search default.svc...  → search domains — why "backend-svc" resolves
@@ -568,6 +685,7 @@ search default.svc...  → search domains — why "backend-svc" resolves
 ndots:5                → if name has fewer than 5 dots, try search
                           domains first before external DNS
 ```
+
 > This is enough to understand what you just observed. The full
 > mechanics — CoreDNS's Corefile and plugins, cross-namespace
 > resolution, service environment variables, DNS policies, and a
@@ -575,6 +693,7 @@ ndots:5                → if name has fewer than 5 dots, try search
 > subject.
 
 Exit the netshoot pod:
+
 ```bash
 exit
 ```
@@ -583,7 +702,19 @@ exit
 
 ### Step 6: Create NodePort Service for Frontend
 
-**04-frontend-svc-nodeport.yaml:**
+Internal connectivity is proven — this step makes the frontend reachable
+from _outside_ the cluster too, completing the two-tier architecture
+from this demo's Lab Overview.
+
+#### Frontend NodePort Service
+
+This Service provisions a ClusterIP automatically (per Concepts above)
+in addition to opening `nodePort: 31000` on every node — the field that
+actually makes the frontend reachable from outside the cluster, which is
+this step's whole point.
+
+**`04-frontend-svc-nodeport.yaml`:**
+
 ```yaml
 apiVersion: v1
 kind: Service
@@ -594,11 +725,20 @@ spec:
   selector:
     app: frontend
   ports:
-    - port: 80          # ClusterIP port (internal)
-      targetPort: 80    # container port
-      nodePort: 31000   # external port on every node (30000-32767)
+    - port: 80 # ClusterIP port (internal)
+      targetPort: 80 # container port
+      nodePort: 31000 # external port on every node (30000-32767)
       protocol: TCP
 ```
+
+| Field                     | Required / Default                             | Description                                                                                                 |
+| ------------------------- | ---------------------------------------------- | ----------------------------------------------------------------------------------------------------------- |
+| `spec.type`               | Yes (must be set to `NodePort` explicitly)     | Unlike `ClusterIP`, this is never the default — must be stated                                              |
+| `spec.selector`           | Yes                                            | Which pods this Service routes to                                                                           |
+| `spec.ports[].port`       | Yes                                            | The auto-provisioned ClusterIP's own port — internal cluster traffic still uses this                        |
+| `spec.ports[].targetPort` | No — defaults to same value as `port`          | Port the container actually listens on                                                                      |
+| `spec.ports[].nodePort`   | No — auto-assigned from 30000-32767 if omitted | The port opened on every node; set explicitly here so it's predictable for curl commands later in this step |
+| `spec.ports[].protocol`   | No — defaults to `TCP`                         | Set explicitly here for clarity                                                                             |
 
 ```bash
 kubectl apply -f 04-frontend-svc-nodeport.yaml
@@ -606,10 +746,12 @@ kubectl get svc frontend-svc
 ```
 
 **Expected output:**
+
 ```
 NAME           TYPE       CLUSTER-IP      EXTERNAL-IP   PORT(S)        AGE
 frontend-svc   NodePort   10.96.xxx.xxx   <none>        80:31000/TCP   5s
 ```
+
 ```
 TYPE=NodePort               → external access enabled
 PORT(S)=80:31000/TCP        → 80=ClusterIP port, 31000=NodePort
@@ -618,10 +760,13 @@ EXTERNAL-IP=<none>          → no cloud load balancer (expected on minikube)
 ```
 
 Inspect the service:
+
 ```bash
 kubectl describe svc frontend-svc
 ```
+
 **Expected output:**
+
 ```
 Name:                     frontend-svc
 Type:                     NodePort
@@ -631,6 +776,7 @@ TargetPort:               80/TCP
 NodePort:                 <unset>  31000/TCP
 Endpoints:                10.244.1.x:80,10.244.2.x:80,10.244.2.x:80
 ```
+
 ```
 NodePort: 31000   → open on EVERY node in the cluster
 Endpoints: 3 pods → all frontend pods registered ✅
@@ -638,11 +784,14 @@ ClusterIP: auto-created → NodePort builds on top of ClusterIP ✅
 ```
 
 **Access frontend externally via NodePort:**
+
 ```bash
 # Get minikube node IPs
 kubectl get nodes -o wide
 ```
+
 **Expected output:**
+
 ```
 NAME        STATUS   INTERNAL-IP
 3node       Ready    192.168.58.2
@@ -654,37 +803,39 @@ NAME        STATUS   INTERNAL-IP
 # Access via any node IP — all nodes proxy port 31000
 curl http://192.168.58.3:31000
 ```
+
 **Expected output:**
+
 ```
-<!DOCTYPE html>
-<html>
-<head>
-<title>Welcome to nginx!</title>
-...
+Hello from frontend pod frontend-deploy-xxxxxxxxx-aaaaa
 ```
 
 ```bash
 # Also works via 3node-m03 — same port on every node
 curl http://192.168.58.4:31000
 ```
+
 **Expected output:**
+
 ```
-<!DOCTYPE html>
-<html>
-<head>
-<title>Welcome to nginx!</title>
-...
+Hello from frontend pod frontend-deploy-xxxxxxxxx-bbbbb
 ```
+
 > Port 31000 is open on ALL nodes — not just nodes running frontend pods.
 > Traffic arriving at any node is forwarded to a frontend pod regardless
-> of which node the pod is on. This is kube-proxy in action — exactly
-> how it programs this is `02-service-internals`'s entire subject.
+> of which node the pod is on — and the differing pod name in each
+> response is direct proof of that, not an assumption. This is kube-proxy
+> in action — exactly how it programs this is `02-service-internals`'s
+> entire subject.
 
 Alternatively use minikube service command:
+
 ```bash
 minikube service frontend-svc -p 3node --url
 ```
+
 **Expected output:**
+
 ```
 http://192.168.58.3:31000
 ```
@@ -693,36 +844,50 @@ http://192.168.58.3:31000
 
 ### Step 7: Verify Load Balancing — NodePort to Pods
 
+This step confirms two things: that repeated external requests actually
+spread across all 3 frontend pods (not just one), and that the
+Endpoints list stays accurate as replica count changes.
+
 ```bash
 # Hit NodePort 10 times — observe requests distributed across pods
 for i in $(seq 1 10); do
-  curl -s http://192.168.58.3:31000 | grep -o "Welcome to nginx"
+  curl -s http://192.168.58.3:31000
+  echo
 done
 ```
-**Expected output:**
+
+**Expected output — different pod names, direct proof of distribution:**
+
 ```
-Welcome to nginx
-Welcome to nginx
-Welcome to nginx
+Hello from frontend pod frontend-deploy-xxxxxxxxx-aaaaa
+Hello from frontend pod frontend-deploy-xxxxxxxxx-bbbbb
+Hello from frontend pod frontend-deploy-xxxxxxxxx-ccccc
+Hello from frontend pod frontend-deploy-xxxxxxxxx-aaaaa
 ...
 ```
 
 Verify endpoints are all healthy:
+
 ```bash
 kubectl get endpoints frontend-svc
 ```
+
 **Expected output:**
+
 ```
 NAME           ENDPOINTS
 frontend-svc   10.244.1.x:80,10.244.2.x:80,10.244.2.x:80
 ```
 
 **Scale down and observe endpoints update automatically:**
+
 ```bash
 kubectl scale deployment frontend-deploy --replicas=1
 kubectl get endpoints frontend-svc
 ```
+
 **Expected output:**
+
 ```
 NAME           ENDPOINTS
 frontend-svc   10.244.x.x:80    ← only 1 endpoint now
@@ -752,8 +917,11 @@ metadata:
 spec:
   terminationGracePeriodSeconds: 0
   containers:
-    - name: nginx
-      image: nginx:1.27
+    - name: frontend
+      image: hashicorp/http-echo:1.0.0
+      args:
+        - "-listen=:80"
+        - "-text=Hello from extra-frontend"
       ports:
         - containerPort: 80
       resources:
@@ -767,7 +935,9 @@ EOF
 
 kubectl get endpoints frontend-svc
 ```
+
 **Expected output:**
+
 ```
 NAME           ENDPOINTS
 frontend-svc   10.244.1.x:80,10.244.2.x:80,10.244.2.x:80,10.244.x.x:80
@@ -787,7 +957,12 @@ kubectl get endpoints frontend-svc
 
 ### Step 9: Imperative Commands
 
+Everything built so far used YAML. This step rebuilds equivalent
+Services imperatively — the faster, exam-relevant path — then cleans
+those throwaway copies up before the real teardown in Step 10.
+
 **Create service using kubectl expose:**
+
 ```bash
 # Expose backend deployment as ClusterIP (same as 02-backend-svc-clusterip.yaml)
 kubectl expose deployment backend-deploy \
@@ -798,13 +973,16 @@ kubectl expose deployment backend-deploy \
 
 kubectl get svc backend-svc-imperative
 ```
+
 **Expected output:**
+
 ```
 NAME                     TYPE        CLUSTER-IP      PORT(S)
 backend-svc-imperative   ClusterIP   10.96.xxx.xxx   9090/TCP
 ```
 
 **Create NodePort service imperatively:**
+
 ```bash
 kubectl expose deployment frontend-deploy \
   --name=frontend-svc-imperative \
@@ -814,16 +992,20 @@ kubectl expose deployment frontend-deploy \
 
 kubectl get svc frontend-svc-imperative
 ```
+
 **Expected output:**
+
 ```
 NAME                      TYPE       CLUSTER-IP      PORT(S)
 frontend-svc-imperative   NodePort   10.96.xxx.xxx   80:3xxxx/TCP
 ```
+
 > Note: nodePort is auto-assigned when not specified imperatively.
 > To specify a fixed nodePort imperatively, use --dry-run and edit
 > the YAML before applying.
 
 **Generate YAML using dry-run:**
+
 ```bash
 kubectl expose deployment backend-deploy \
   --name=backend-svc-dry \
@@ -833,7 +1015,9 @@ kubectl expose deployment backend-deploy \
   --dry-run=client \
   -o yaml
 ```
+
 **Expected output:**
+
 ```yaml
 apiVersion: v1
 kind: Service
@@ -841,19 +1025,21 @@ metadata:
   name: backend-svc-dry
 spec:
   ports:
-  - port: 9090
-    protocol: TCP
-    targetPort: 5678
+    - port: 9090
+      protocol: TCP
+      targetPort: 5678
   selector:
     app: backend
   type: ClusterIP
 ```
+
 > `--dry-run=client -o yaml` generates the manifest without creating
 > the resource, exactly the technique already covered in
 > `01-core-concepts/04-kubectl-essentials` — useful here for adding
 > fields not available imperatively (e.g. a fixed `nodePort` value).
 
 **Cleanup imperative services:**
+
 ```bash
 kubectl delete svc backend-svc-imperative frontend-svc-imperative
 ```
@@ -861,6 +1047,9 @@ kubectl delete svc backend-svc-imperative frontend-svc-imperative
 ---
 
 ### Step 10: Final Cleanup
+
+Tear down everything created in Steps 1–8, in reverse dependency order
+(Services before the Deployments they select).
 
 ```bash
 kubectl delete -f 04-frontend-svc-nodeport.yaml
@@ -875,6 +1064,7 @@ kubectl get deployments
 ```
 
 **Expected output:**
+
 ```
 NAME         TYPE        CLUSTER-IP   EXTERNAL-IP   PORT(S)   AGE
 kubernetes   ClusterIP   10.96.0.1    <none>        443/TCP   ...
@@ -888,7 +1078,8 @@ No resources found in default namespace.
 ## What You Learned
 
 In this lab, you:
-- ✅ Deployed a two-tier application — nginx frontend + http-echo backend
+
+- ✅ Deployed a two-tier application — frontend + backend, both distinguishable per-pod via the Downward API
 - ✅ Created a ClusterIP service and verified 3 backend endpoints registered
 - ✅ Verified internal DNS resolution — `backend-svc` resolves via CoreDNS
 - ✅ Verified load balancing — requests distributed across pod replicas
@@ -906,9 +1097,56 @@ In this lab, you:
 cd src/break-fix/
 ```
 
-### Error-1
+> **Both scenarios below are self-contained** — the main lab's Step 10
+> cleanup already removed everything, so each one deploys its own
+> throwaway backend rather than assuming `backend-deploy` is still
+> running.
+
+### Error-1 — "My Service exists, but nothing ever reaches a pod"
+
+**The scenario:** you've deployed a backend and a Service meant to front
+it, `kubectl apply` succeeded with no errors, but every request to the
+Service just hangs — no connection refused, no clear error, just
+silence. Investigate and fix it.
+
+```bash
+# Self-contained: deploy a throwaway backend for this scenario
+cat <<EOF | kubectl apply -f -
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: breakfix-backend
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: breakfix-backend
+  template:
+    metadata:
+      labels:
+        app: breakfix-backend
+    spec:
+      terminationGracePeriodSeconds: 0
+      containers:
+        - name: backend
+          image: hashicorp/http-echo:1.0.0
+          args:
+            - "-text=Hello from breakfix backend"
+          ports:
+            - containerPort: 5678
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "32Mi"
+            limits:
+              cpu: "100m"
+              memory: "64Mi"
+EOF
+kubectl rollout status deployment/breakfix-backend
+```
 
 **`src/break-fix/01-selector-typo.yaml`:**
+
 ```yaml
 apiVersion: v1
 kind: Service
@@ -917,7 +1155,7 @@ metadata:
 spec:
   type: ClusterIP
   selector:
-    app: backedn      # typo: should be "backend"
+    app: breakfix-backedn # typo: should be "breakfix-backend"
   ports:
     - port: 9090
       targetPort: 5678
@@ -931,24 +1169,68 @@ kubectl get endpoints backend-svc-typo
 <details>
 <summary>Reveal answer — attempt diagnosis first</summary>
 
-**Cause:** The selector's value is `backedn` (typo), which matches no pod's actual `app: backend` label. This is valid YAML — Kubernetes accepts it without complaint — it simply results in a Service with no matching pods.
+**Cause:** The selector's value is `breakfix-backedn` (typo), which matches no pod's actual `app: breakfix-backend` label. This is valid YAML — Kubernetes accepts it without complaint — it simply results in a Service with no matching pods.
 
-**Fix:** Correct the selector to `app: backend` and reapply.
+**Fix:** Correct the selector to `app: breakfix-backend` and reapply.
 
 **Cascade:** `kubectl get endpoints backend-svc-typo` shows an empty Endpoints list — not an error, just nothing. Every request to this Service fails or hangs with no Kubernetes-level error pointing at the actual cause. `kubectl describe svc backend-svc-typo` confirms the selector value but doesn't flag it as wrong, since Kubernetes has no way to know a label typo from an intentional selector.
 
 </details>
 
 **Cleanup:**
+
 ```bash
 kubectl delete svc backend-svc-typo 2>/dev/null || true
+kubectl delete deployment breakfix-backend 2>/dev/null || true
 ```
 
 ---
 
-### Error-2
+### Error-2 — "Endpoints look healthy, but requests still fail"
+
+**The scenario:** a teammate swears the Service is misconfigured, but
+`kubectl describe svc` shows healthy, correctly-selected Endpoints —
+the pods are Running and Ready. Requests still hang anyway. If the
+selector and the pods are both fine, what else could it be?
+
+```bash
+# Self-contained: deploy a throwaway backend for this scenario
+cat <<EOF | kubectl apply -f -
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: breakfix-backend2
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: breakfix-backend2
+  template:
+    metadata:
+      labels:
+        app: breakfix-backend2
+    spec:
+      terminationGracePeriodSeconds: 0
+      containers:
+        - name: backend
+          image: hashicorp/http-echo:1.0.0
+          args:
+            - "-text=Hello from breakfix backend 2"
+          ports:
+            - containerPort: 5678
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "32Mi"
+            limits:
+              cpu: "100m"
+              memory: "64Mi"
+EOF
+kubectl rollout status deployment/breakfix-backend2
+```
 
 **`src/break-fix/02-port-target-port-swap.yaml`:**
+
 ```yaml
 apiVersion: v1
 kind: Service
@@ -957,10 +1239,10 @@ metadata:
 spec:
   type: ClusterIP
   selector:
-    app: backend
+    app: breakfix-backend2
   ports:
-    - port: 5678         # swapped — this should be targetPort's value
-      targetPort: 9090   # swapped — backend doesn't listen here
+    - port: 5678 # swapped — this should be targetPort's value
+      targetPort: 9090 # swapped — backend doesn't listen here
 ```
 
 ```bash
@@ -971,17 +1253,19 @@ kubectl run netshoot --image=nicolaka/netshoot --rm -it --restart=Never -- curl 
 <details>
 <summary>Reveal answer — attempt diagnosis first</summary>
 
-**Cause:** `port` and `targetPort` got swapped. The Service correctly accepts connections on `port: 5678`, but forwards them to `targetPort: 9090` — a port the `hashicorp/http-echo` container isn't actually listening on (it listens on 5678, per this demo's own Deployment).
+**Cause:** `port` and `targetPort` got swapped. The Service correctly accepts connections on `port: 5678`, but forwards them to `targetPort: 9090` — a port the `hashicorp/http-echo` container isn't actually listening on (it listens on 5678, per this scenario's own Deployment).
 
-**Fix:** Swap the values back: `port: 9090`, `targetPort: 5678` (matching `02-backend-svc-clusterip.yaml`).
+**Fix:** Swap the values back: `port: 9090`, `targetPort: 5678`.
 
 **Cascade:** The `curl` request hangs or times out rather than giving a clear "connection refused" — from outside the pod there's no way to see that the request reached a real pod IP but hit a closed port. `kubectl describe svc` still shows healthy Endpoints (the pods are fine, Ready, selected correctly) — this is purely a port-mapping mistake, not a selector or pod-health problem, which is exactly what makes it a distinct failure mode from Error-1.
 
 </details>
 
 **Cleanup:**
+
 ```bash
 kubectl delete svc backend-svc-swapped 2>/dev/null || true
+kubectl delete deployment breakfix-backend2 2>/dev/null || true
 ```
 
 ---
@@ -1012,25 +1296,25 @@ A: A `port`/`targetPort` swap — the Service can have perfectly healthy, correc
 
 ### Exam Objective Mapping
 
-| Domain | Exam | Weight | Covered here |
-|---|---|---|---|
-| Services & Networking | CKA | 20% | ClusterIP, NodePort, port/targetPort, selectors |
-| Services & Networking | CKAD | — | Service creation, imperative `kubectl expose` |
-| Application Deployment | CKAD | — | Connecting a Deployment to a Service via labels |
+| Domain                 | Exam | Weight | Covered here                                    |
+| ---------------------- | ---- | ------ | ----------------------------------------------- |
+| Services & Networking  | CKA  | 20%    | ClusterIP, NodePort, port/targetPort, selectors |
+| Services & Networking  | CKAD | —      | Service creation, imperative `kubectl expose`   |
+| Application Deployment | CKAD | —      | Connecting a Deployment to a Service via labels |
 
 ### Common Exam Traps
 
-| Trap | Why it trips people up |
-|---|---|
-| Confusing `port` and `targetPort` | Easy to write them backwards under time pressure — the Service still applies without error, just silently forwards to the wrong place |
-| A selector typo | Valid YAML, silently matches zero pods — no error message points at the cause; always cross-check against `kubectl get pods --show-labels` |
-| Assuming `EXTERNAL-IP: <none>` means the Service is broken | It's expected and correct for both ClusterIP and NodePort — only `LoadBalancer` populates this field |
-| Forgetting NodePort's range is 30000-32767 | Specifying a `nodePort` outside this range is rejected outright |
-| Not checking `kubectl get endpoints` when a Service "isn't working" | Empty endpoints is the single fastest signal that the selector, not the network, is the problem |
+| Trap                                                                | Why it trips people up                                                                                                                     |
+| ------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
+| Confusing `port` and `targetPort`                                   | Easy to write them backwards under time pressure — the Service still applies without error, just silently forwards to the wrong place      |
+| A selector typo                                                     | Valid YAML, silently matches zero pods — no error message points at the cause; always cross-check against `kubectl get pods --show-labels` |
+| Assuming `EXTERNAL-IP: <none>` means the Service is broken          | It's expected and correct for both ClusterIP and NodePort — only `LoadBalancer` populates this field                                       |
+| Forgetting NodePort's range is 30000-32767                          | Specifying a `nodePort` outside this range is rejected outright                                                                            |
+| Not checking `kubectl get endpoints` when a Service "isn't working" | Empty endpoints is the single fastest signal that the selector, not the network, is the problem                                            |
 
 ### Exam Task — Write it from scratch
 
-Create a Deployment named `web` running `nginx:1.27` with 2 replicas, then expose it as a NodePort Service on port 80 with a fixed `nodePort` of 30080.
+Create a Deployment named `web` running `nginx:1.30.4` with 2 replicas, then expose it as a NodePort Service on port 80 with a fixed `nodePort` of 30080.
 
 Official docs: [Service](https://kubernetes.io/docs/concepts/services-networking/service/)
 
@@ -1038,7 +1322,7 @@ Official docs: [Service](https://kubernetes.io/docs/concepts/services-networking
 <summary>Reveal solution</summary>
 
 ```bash
-kubectl create deployment web --image=nginx:1.27 --replicas=2
+kubectl create deployment web --image=nginx:1.30.4 --replicas=2
 kubectl expose deployment web --port=80 --target-port=80 --type=NodePort --dry-run=client -o yaml > web-svc.yaml
 # edit web-svc.yaml to set spec.ports[0].nodePort: 30080
 kubectl apply -f web-svc.yaml
@@ -1053,51 +1337,53 @@ kubectl get svc web
 
 ## Key Takeaways
 
-| Concept | Detail |
-|---|---|
-| A Service's stable identity solves pod ephemerality | Pods get new IPs on every restart; a Service's ClusterIP and DNS name never change |
-| `port` vs `targetPort` are two different things | `port` is what clients use; `targetPort` is what the container actually listens on |
-| NodePort is built on top of ClusterIP, not instead of it | Every NodePort Service also gets a ClusterIP automatically |
-| NodePort opens the same port on every node | Regardless of which node actually runs a matching pod |
-| A selector typo is silent | Valid YAML, zero matching pods, no error — check `get endpoints` and `get pods --show-labels` |
-| Only Ready pods become Endpoints | Matching the selector alone isn't sufficient |
+| Concept                                                        | Detail                                                                                        |
+| -------------------------------------------------------------- | --------------------------------------------------------------------------------------------- |
+| A Service's stable identity solves pod ephemerality            | Pods get new IPs on every restart; a Service's ClusterIP and DNS name never change            |
+| `port` vs `targetPort` are two different things                | `port` is what clients use; `targetPort` is what the container actually listens on            |
+| NodePort is built on top of ClusterIP, not instead of it       | Every NodePort Service also gets a ClusterIP automatically                                    |
+| NodePort opens the same port on every node                     | Regardless of which node actually runs a matching pod                                         |
+| A selector typo is silent                                      | Valid YAML, zero matching pods, no error — check `get endpoints` and `get pods --show-labels` |
+| Only Ready pods become Endpoints                               | Matching the selector alone isn't sufficient                                                  |
 | `port`/`targetPort` mismatches are invisible in `describe svc` | The Service looks correctly configured even when it's forwarding to a port nothing listens on |
-| `EXTERNAL-IP: <none>` is normal for ClusterIP and NodePort | Only `LoadBalancer` populates this field |
+| `EXTERNAL-IP: <none>` is normal for ClusterIP and NodePort     | Only `LoadBalancer` populates this field                                                      |
 
 ---
 
 ## Quick Commands Reference
 
-| Command | Description |
-|---------|-------------|
-| `kubectl get svc` | List all services |
-| `kubectl describe svc <name>` | Show service details including endpoints |
-| `kubectl get endpoints <name>` | Show pod IPs registered as endpoints |
-| `kubectl expose deployment <name> --type=ClusterIP --port=<p> --target-port=<p>` | Create ClusterIP imperatively |
-| `kubectl expose deployment <name> --type=NodePort --port=<p>` | Create NodePort imperatively |
-| `minikube service <name> -p 3node --url` | Get NodePort URL on minikube |
-| `kubectl get nodes -o wide` | Show node IPs for NodePort access |
-| `kubectl explain svc.spec` | Browse Service spec field docs |
+| Command                                                                          | Description                              |
+| -------------------------------------------------------------------------------- | ---------------------------------------- |
+| `kubectl get svc`                                                                | List all services                        |
+| `kubectl describe svc <name>`                                                    | Show service details including endpoints |
+| `kubectl get endpoints <name>`                                                   | Show pod IPs registered as endpoints     |
+| `kubectl expose deployment <name> --type=ClusterIP --port=<p> --target-port=<p>` | Create ClusterIP imperatively            |
+| `kubectl expose deployment <name> --type=NodePort --port=<p>`                    | Create NodePort imperatively             |
+| `minikube service <name> -p 3node --url`                                         | Get NodePort URL on minikube             |
+| `kubectl get nodes -o wide`                                                      | Show node IPs for NodePort access        |
+| `kubectl explain svc.spec`                                                       | Browse Service spec field docs           |
 
 ### Generating YAML skeletons with --dry-run
 
 ```bash
 kubectl expose deployment backend-deploy --name=backend-svc --type=ClusterIP --port=9090 --target-port=5678 --dry-run=client -o yaml
 ```
-See `01-core-concepts/04-kubectl-essentials` for the full canonical `--dry-run=client` vs `--dry-run=server` explanation — this demo only applies the technique, it doesn't re-teach it.
+
+See `appendix-kubectl/01-kubectl-fundamentals` for the full canonical `--dry-run=client` vs `--dry-run=server` explanation — this demo only applies the technique, it doesn't re-teach it.
 
 ### Imperative Quick-Create Commands
 
-| Object | Imperative command | Notes |
-|---|---|---|
+| Object              | Imperative command                                        | Notes                                             |
+| ------------------- | --------------------------------------------------------- | ------------------------------------------------- |
 | Service (ClusterIP) | `kubectl expose deployment NAME --port=P --target-port=P` | `--type=ClusterIP` is the default, can be omitted |
-| Service (NodePort) | `kubectl expose deployment NAME --port=P --type=NodePort` | `nodePort` auto-assigned unless set via YAML |
+| Service (NodePort)  | `kubectl expose deployment NAME --port=P --type=NodePort` | `nodePort` auto-assigned unless set via YAML      |
 
 ---
 
 ## Troubleshooting
 
 **Service shows no endpoints:**
+
 ```bash
 kubectl describe svc <name>
 # Check Endpoints field — if empty, selector may not match pod labels
@@ -1106,6 +1392,7 @@ kubectl get pods --show-labels
 ```
 
 **curl to service name fails from inside pod:**
+
 ```bash
 # Verify DNS is working
 nslookup <service-name>
@@ -1116,6 +1403,7 @@ curl <service-name>.<namespace>.svc.cluster.local:<port>
 ```
 
 **NodePort not accessible externally:**
+
 ```bash
 # Verify NodePort is in 30000-32767 range
 kubectl get svc <name>
@@ -1126,6 +1414,7 @@ curl http://<node-ip>:<nodeport>
 ```
 
 **Wrong number of endpoints:**
+
 ```bash
 kubectl get pods -l <selector> -o wide
 # Check all pods are Ready (1/1) not just Running
@@ -1138,7 +1427,7 @@ kubectl get pods -l <selector> -o wide
 
 **`01-clusterip-nodeport-anki.csv`:**
 
-````
+```
 #deck:k8s-platform-labs::03-services::01-clusterip-nodeport
 #separator:Comma
 #columns:Front,Back,Tags
@@ -1161,7 +1450,7 @@ kubectl get pods -l <selector> -o wide
 "Can you pin a Service's nodePort to a specific number using only kubectl expose flags?","No — kubectl expose has no flag for it; you must set spec.ports[].nodePort explicitly in YAML (or --dry-run=client -o yaml, then edit)","demo01-services,imperative,nodeport,ckad-application-deployment"
 "If every backend pod returns an identical response, does that prove load balancing isn't happening?","No — it just means you can't tell from response content alone; you need distinguishing data per pod (e.g. pod name/hostname in the response) to actually verify load balancing is occurring","demo01-services,load-balancing,debugging,cka-troubleshooting"
 "What does IP Family Policy: SingleStack mean on a Service?","The Service uses only one IP family (IPv4 or IPv6), not both at once — dual-stack Services exist via PreferDualStack/RequireDualStack instead, which this demo's cluster isn't configured for","demo01-services,networking,dual-stack,cka-services-networking"
-````
+```
 
 ---
 
@@ -1169,8 +1458,7 @@ kubectl get pods -l <selector> -o wide
 
 **`01-clusterip-nodeport-quiz.csv`:**
 
-
-````markdown
+```markdown
 # Quiz — 03-services/01-clusterip-nodeport: ClusterIP and NodePort Services
 
 > One correct answer per question unless stated otherwise.
@@ -1186,7 +1474,7 @@ kubectl get pods -l <selector> -o wide
 <details>
 <summary>Answer</summary>
 
-**B** — `describe svc` shows the port mapping as configured, not validated against what the container actually listens on. Healthy Endpoints only confirms the *pods* are fine and selected correctly, not that the port mapping is correct.
+**B** — `describe svc` shows the port mapping as configured, not validated against what the container actually listens on. Healthy Endpoints only confirms the _pods_ are fine and selected correctly, not that the port mapping is correct.
 Trap: A is ruled out by the premise — "3 healthy Endpoints" already means the pods are Running and Ready.
 
 </details>
@@ -1204,7 +1492,7 @@ Trap: A is ruled out by the premise — "3 healthy Endpoints" already means the 
 <summary>Answer</summary>
 
 **B** — Expecting IP stability from the Pod layer at all is the wrong mental model — that's precisely the problem Services solve, at a different layer entirely.
-Trap: C sounds plausible if you've heard "StatefulSets give stable identity," but that's stable *network identity via DNS*, not stable *IP addresses* — a distinction this demo doesn't cover but is worth not overgeneralizing from.
+Trap: C sounds plausible if you've heard "StatefulSets give stable identity," but that's stable _network identity via DNS_, not stable _IP addresses_ — a distinction this demo doesn't cover but is worth not overgeneralizing from.
 
 </details>
 
@@ -1288,7 +1576,7 @@ Trap: A is a real trap for people newer to Kubernetes — Services genuinely hav
 <details>
 <summary>Answer</summary>
 
-**B** — The taint only affects *pod scheduling*, not NodePort's own behavior — kube-proxy opens the NodePort on every node regardless of taints or what's actually running there.
+**B** — The taint only affects _pod scheduling_, not NodePort's own behavior — kube-proxy opens the NodePort on every node regardless of taints or what's actually running there.
 Trap: C sounds plausible because taints were just covered in Step 1, but a scheduling taint and NodePort's per-node listener are unrelated mechanisms.
 
 </details>
@@ -1306,7 +1594,7 @@ Trap: C sounds plausible because taints were just covered in Step 1, but a sched
 <summary>Answer</summary>
 
 **B** — `--port` controls the ClusterIP-facing port, not `nodePort` — to pin the actual external port you need `spec.ports[].nodePort` set explicitly, which means YAML (or `--dry-run=client -o yaml` then edit).
-Trap: C overcorrects — nodePort *can* be fixed, just not through `kubectl expose`'s flags alone.
+Trap: C overcorrects — nodePort _can_ be fixed, just not through `kubectl expose`'s flags alone.
 
 </details>
 
@@ -1323,10 +1611,9 @@ Trap: C overcorrects — nodePort *can* be fixed, just not through `kubectl expo
 <summary>Answer</summary>
 
 **B** — Verifying load balancing requires distinguishing data per pod (like a pod name embedded in the response) — identical output across pods is a testing-setup limitation, not evidence about routing behavior.
-Trap: A and C both draw a routing conclusion from response *content*, when content and routing are actually independent of each other here.
+Trap: A and C both draw a routing conclusion from response _content_, when content and routing are actually independent of each other here.
 
 </details>
-
 
 Score guide:
 | Score | Action |
@@ -1335,4 +1622,4 @@ Score guide:
 | 8/9 | Review the wrong answer, then proceed |
 | 6-7/9 | Re-read the relevant section, retry those questions |
 | Below 6/9 | Re-read the full demo and redo the walkthrough before proceeding |
-````
+```

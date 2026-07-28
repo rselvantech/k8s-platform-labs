@@ -15,7 +15,15 @@ spec:
       terminationGracePeriodSeconds: 0
       containers:
         - name: frontend
-          image: nginx:1.27
+          image: hashicorp/http-echo:1.0.0
+          args:
+            - "-listen=:80"
+            - "-text=Hello from frontend pod $(MY_POD_NAME)"
+          env:
+            - name: MY_POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
           ports:
             - containerPort: 80
           resources:
