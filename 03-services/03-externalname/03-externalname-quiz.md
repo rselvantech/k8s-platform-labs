@@ -2,104 +2,106 @@
 
 > One correct answer per question unless stated otherwise.
 > Target: 80% or above before moving to next Demo.
+> This quiz does not restate the Anki deck's facts verbatim — it tests
+> other Concepts/Lab material the deck doesn't cover.
 
-**Q1. What does an ExternalName Service actually do?**
+**Q1. Concepts lists a TLS certificate validation limitation for ExternalName. Why might a TLS handshake fail even though DNS resolution via the CNAME works perfectly?**
 
-- A) Routes traffic to pods via a virtual IP, like ClusterIP
-- B) Returns a DNS CNAME record — pure redirection, no proxying at all
-- C) Opens a port on every node, like NodePort
-- D) Load balances across multiple external IPs automatically
+- A) ExternalName Services can't carry HTTPS traffic at all
+- B) The certificate presented by the external server is issued for its own real hostname, but the application may be validating against the internal Service name instead
+- C) TLS is stripped by CoreDNS during CNAME resolution
+- D) ExternalName requires plaintext HTTP only
 
 <details>
 <summary>Answer</summary>
 
-**B** — No virtual IP, no kube-proxy involvement, no EndpointSlices — just a CNAME.
-Trap: A and C both describe mechanisms that involve pod/IP routing, which ExternalName specifically doesn't do.
+**B** — This is the TLS-layer sibling of the HTTP Host-header problem — DNS redirection changes where the connection goes, but doesn't change what identity the application expects to be talking to.
+Trap: C invents a DNS-layer effect on TLS that doesn't exist — CoreDNS only resolves names, it has no role in the TLS handshake itself.
 
 </details>
 
 ---
 
-**Q2. Can `externalName` be set to an IP address like `192.168.1.100`?**
+**Q2. `kubectl get svc database-svc` shows `EXTERNAL-IP: httpbin.org`. Is this field actually holding an IP address here?**
 
-- A) Yes, it resolves directly to that address
-- B) No — it's treated as a DNS name made of digits and fails to resolve
-- C) Only if quoted as a string
-- D) Only on cloud-provider clusters
+- A) Yes, `httpbin.org` has been pre-resolved to an IP for display
+- B) No — for ExternalName, this column is repurposed to display the CNAME target hostname, not a literal IP
+- C) This is a display bug
+- D) It only shows a hostname if the Service was created imperatively
 
 <details>
 <summary>Answer</summary>
 
-**B** — DNS doesn't resolve an IP-looking string as an address here; it results in NXDOMAIN.
-Trap: C suggests a workaround that doesn't exist — quoting doesn't change how DNS interprets the value.
+**B** — Contrast this with a NodePort/LoadBalancer Service, where `EXTERNAL-IP` genuinely holds an IP (or `<none>`) — for `ExternalName`, the same column is repurposed to show the hostname target instead, since there's no IP to show at all.
+Trap: A imagines a resolution step that doesn't happen at the `kubectl get svc` level — it just echoes the `externalName` field's literal value.
 
 </details>
 
 ---
 
-**Q3. You add a `selector` field to an ExternalName Service, expecting it to also route matching pods as a fallback. What happens?**
+**Q3. `kubectl expose` cannot create an ExternalName Service. Structurally, why not — beyond just "it's a different subcommand"?**
 
-- A) It routes to pods only when the external DNS lookup fails
-- B) Nothing — the selector is accepted but has no effect at all
-- C) Kubernetes rejects the Service as invalid
-- D) It converts the Service to ClusterIP automatically
+- A) `kubectl expose` is hardcoded to reject the `ExternalName` type string
+- B) `kubectl expose` always derives its target from an existing Deployment/Pod's selector and ports — but `ExternalName` has no selector, no ports, and no pod target at all to derive anything from
+- C) `ExternalName` Services didn't exist when `kubectl expose` was written
+- D) `kubectl expose` only supports `type=ClusterIP`
 
 <details>
 <summary>Answer</summary>
 
-**B** — This field is silently ignored on ExternalName Services — no error, no fallback behavior, just unused configuration.
-Trap: A imagines a fallback mechanism that doesn't exist — ExternalName has exactly one behavior, CNAME redirection, with no conditional logic.
+**B** — `expose`'s entire model is "take this existing workload object and front it with a Service" — `ExternalName` isn't fronting anything in the cluster at all, so there's nothing for `expose` to derive a selector or port from.
+Trap: D is factually wrong and worth ruling out — `expose` supports ClusterIP, NodePort, and LoadBalancer, just not ExternalName.
 
 </details>
 
 ---
 
-**Q4. What Host header does an external server receive when a pod accesses it via an ExternalName Service?**
+**Q4. Both an IP address (`192.168.1.100`) and a URL with a scheme (`http://httpbin.org`) fail identically as `externalName` values — `NXDOMAIN`, no apply-time error. What's the shared root cause?**
 
-- A) The external server's own real hostname
-- B) The internal Service's name (e.g. `database-svc`), not the external hostname
-- C) No Host header is sent at all
-- D) The pod's own hostname
+- A) Both are blocked by an explicit Kubernetes validation rule
+- B) Kubernetes never validates `externalName` against real DNS hostname syntax at apply time — both are accepted as strings and only fail later, when something actually tries to resolve them
+- C) They fail for unrelated reasons that happen to look similar
+- D) Only the IP case is a real failure; the URL case actually works
 
 <details>
 <summary>Answer</summary>
 
-**B** — This is a real production gotcha: the app still addresses the internal Service name, so that's what ends up in the Host header, regardless of where DNS actually redirected the connection.
-Trap: A assumes DNS redirection somehow rewrites application-layer headers too — it only affects DNS resolution, nothing at the HTTP layer.
+**B** — Neither this demo's Step 5 (IP) nor Break-Fix Error-2 (URL) is caught by `kubectl apply` — both are syntactically "valid enough" strings that Kubernetes stores without complaint, and both only reveal the problem when DNS resolution is actually attempted.
+Trap: A assumes validation exists where the demo explicitly shows it doesn't — the entire point of both scenarios is the absence of an apply-time check.
 
 </details>
 
 ---
 
-**Q5. Can an ExternalName Service's target be another Kubernetes Service's own DNS name?**
+**Q5. Step 4's migration relies on `backend-real-svc.default.svc.cluster.local` already being a real, resolvable DNS name. Which prior demo's mechanism is what actually makes that true?**
 
-- A) No, only external (non-Kubernetes) hostnames are valid
-- B) Yes — CNAME chaining to a real resolvable hostname works, including another Service's internal DNS name
-- C) Only if both Services are in the same namespace
-- D) Only for headless Services
+- A) `02-service-internals`'s EndpointSlice mechanism
+- B) `01-clusterip-nodeport`'s CoreDNS-resolves-Service-names-to-ClusterIP mechanism
+- C) This demo's own ExternalName mechanism, applied recursively
+- D) It's a special DNS record created only for migration scenarios
 
 <details>
 <summary>Answer</summary>
 
-**B** — This is exactly Step 4's migration demo: `externalName` gets set to `backend-real-svc.default.svc.cluster.local`, a perfectly valid, resolvable DNS name.
-Trap: C invents a same-namespace restriction that doesn't exist — the target just needs to be a resolvable hostname, full stop.
+**B** — Every ClusterIP Service automatically gets a DNS name of this exact shape, resolved by CoreDNS — that's `01-clusterip-nodeport`'s subject, and it's what lets an `ExternalName` Service CNAME-chain to it without anything special being set up for the migration itself.
+Trap: C is circular — ExternalName is what's *consuming* that resolvable name in this step, not what's producing it.
 
 </details>
 
 ---
 
-**Q6. When would a selectorless Service (from `02-service-internals`) be the right choice instead of ExternalName?**
+**Q6. Does the `spec.externalName` field accept a list of multiple hostnames for basic failover between them?**
 
-- A) When the external target is a stable IP address, not a hostname
-- B) Never — ExternalName always supersedes selectorless Services
-- C) Only for internal cluster traffic
-- D) Only when using NodePort
+- A) Yes, up to 3 hostnames
+- B) No — `externalName` is a single string field; there's no multi-hostname or failover concept built into this Service type at all
+- C) Yes, but only with `type: LoadBalancer`
+- D) Only in newer Kubernetes versions
 
 <details>
 <summary>Answer</summary>
 
-**A** — ExternalName needs a hostname; a selectorless Service with a manual EndpointSlice is the mechanism for a stable IP, since ExternalName explicitly can't handle IPs at all.
-Trap: B treats the two as strictly ranked rather than suited to different situations — they solve genuinely different problems.
+**B** — Every manifest in this demo shows `externalName` as a single scalar string — there's no field shape here for a list, and nothing in ExternalName's pure-CNAME design supports choosing between multiple targets.
+Trap: C invents a dependency on a completely different Service type — `LoadBalancer` and `ExternalName` are mutually exclusive `spec.type` values, not something combinable.
 
 </details>
 
@@ -122,22 +124,23 @@ Trap: D assumes apply-time validation catches this — it doesn't; the failure o
 
 ---
 
-**Q8. Does ExternalName perform load balancing across multiple external endpoints?**
+**Q8. If `httpbin.org`'s own DNS record later points to a different IP address (its operators change hosting providers, say), does `database-svc` need to be updated?**
 
-- A) Yes, automatically, using round-robin
-- B) No — it returns a single CNAME; any load balancing is up to the external DNS itself
-- C) Yes, but only in ipvs mode
-- D) Only if `spec.ports` is set
+- A) Yes — the Service object caches the resolved IP and needs to be refreshed
+- B) No — `database-svc` only stores the hostname `httpbin.org`; resolving that hostname to whatever IP it currently points to happens fresh at DNS lookup time, every time
+- C) Only if `kubectl rollout restart` is run
+- D) Only if the Service is recreated
 
 <details>
 <summary>Answer</summary>
 
-**B** — kube-proxy is never involved with ExternalName Services at all — whatever load balancing exists is entirely a property of the external hostname's own DNS records, outside Kubernetes' control.
-Trap: C ties this to a kube-proxy mode, but kube-proxy has no role in ExternalName Services whatsoever, in any mode.
+**B** — This is the direct payoff of "pure DNS redirection, no proxying" from Concepts — the Service holds a hostname, not a cached IP, so anything downstream that hostname's own DNS does is transparent to Kubernetes.
+Trap: A imagines a caching layer inside the Service object that doesn't exist — there's nothing to go stale, since no IP is ever stored there in the first place.
 
 </details>
 
 Score guide:
+
 | Score | Action |
 |---|---|
 | 8/8 | Import Anki cards, move to next Demo |
