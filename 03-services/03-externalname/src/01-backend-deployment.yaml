@@ -15,7 +15,7 @@ spec:
       terminationGracePeriodSeconds: 0
       containers:
         - name: backend
-          image: hashicorp/http-echo:0.2.3
+          image: hashicorp/http-echo:1.0.0
           args:
             - "-text=Response from migrated backend"
           ports:

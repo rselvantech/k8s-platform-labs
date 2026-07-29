@@ -180,6 +180,15 @@ genuinely different mechanisms depending on whether you have a hostname
 
 ## Lab Step-by-Step Guide
 
+By the end of this walkthrough you'll have an `ExternalName` Service
+pointing at a public external host, verify it resolves as a DNS CNAME
+(not a virtual IP), then — without changing any application
+configuration — repoint that same Service at a real in-cluster backend,
+proving the "decouple the app from where the target actually lives"
+value this Service type exists for. Steps 1–2 set up both sides; Steps
+3–5 verify and probe limitations; Step 6 rebuilds the same Service
+imperatively.
+
 ### Step 1: Deploy a Real Backend (Migration Target)
 
 This step simulates the scenario where you start with an external service
@@ -190,7 +199,13 @@ without changing application configuration.
 cd 03-services/03-externalname/src
 ```
 
-**01-backend-deployment.yaml:**
+#### Backend Deployment
+
+A standard backend, identical in shape to every prior demo's — nothing
+about this object is specific to `ExternalName`. Its only role here is
+being the eventual **migration target** for Step 4.
+
+**`01-backend-deployment.yaml`:**
 ```yaml
 apiVersion: apps/v1
 kind: Deployment
@@ -209,7 +224,7 @@ spec:
       terminationGracePeriodSeconds: 0
       containers:
         - name: backend
-          image: hashicorp/http-echo:0.2.3
+          image: hashicorp/http-echo:1.0.0
           args:
             - "-text=Response from migrated backend"
           ports:
@@ -223,7 +238,12 @@ spec:
               memory: "64Mi"
 ```
 
-**02-backend-svc.yaml:**
+#### Backend ClusterIP Service
+
+A plain ClusterIP Service — the real, in-cluster target Step 4's
+migration will eventually point the ExternalName Service at.
+
+**`02-backend-svc.yaml`:**
 ```yaml
 apiVersion: v1
 kind: Service
@@ -255,7 +275,16 @@ backend-real-svc   ClusterIP   10.96.xxx.xxx   5678/TCP
 
 ### Step 2: Create ExternalName Service Pointing to External Host
 
-**03-externalname-svc.yaml:**
+This step creates the demo's actual subject — an `ExternalName` Service,
+the only genuinely new manifest shape in this entire demo.
+
+#### ExternalName Service
+
+Unlike every Service type covered so far, this one has no `selector`,
+no `ports`, and no virtual IP at all — it's pure DNS redirection to a
+hostname, verified concretely in Step 3.
+
+**`03-externalname-svc.yaml`:**
 ```yaml
 apiVersion: v1
 kind: Service
@@ -263,8 +292,16 @@ metadata:
   name: database-svc
 spec:
   type: ExternalName
-  externalName: httpbin.org
+  externalName: httpbin.org   # bare hostname only — no scheme, no IP, see Step 5 and Break-Fix Error-2
 ```
+
+| Field | Required / Default | Description |
+|---|---|---|
+| `spec.type` | Yes (must be `ExternalName` explicitly) | Never a default — the field that switches this Service into pure-DNS mode |
+| `spec.externalName` | Yes | Must be a bare DNS hostname — no `http://` scheme, no IP address (both fail silently, see Step 5/Break-Fix Error-2) |
+| `spec.selector` | Not applicable to this type | Omit entirely — see this demo's Break-Fix Error-1 for what happens if you add one anyway |
+| `spec.ports` | Not applicable to this type | Also omit — accepted if present, but has no effect |
+
 > We use `httpbin.org` — a public HTTP testing service — as the "external
 > database" for this demo. In production this would be your RDS endpoint
 > or other external service hostname.
@@ -300,6 +337,10 @@ either the ClusterIP or selectorless cases from `02-service-internals`. ✅
 ---
 
 ### Step 3: Verify CNAME Resolution from Inside a Pod
+
+This step proves the `TYPE=ExternalName` / `CLUSTER-IP=<none>` output
+from Step 2 by actually querying DNS from inside a pod — confirming a
+CNAME comes back, not an IP.
 
 ```bash
 kubectl run netshoot --image=nicolaka/netshoot --rm -it --restart=Never -- bash
@@ -472,6 +513,10 @@ kubectl delete svc ip-externalname
 
 ### Step 6: Imperative Creation
 
+This step rebuilds an ExternalName Service the fast, exam-relevant way —
+worth knowing since `kubectl expose` (used for every other Service type
+in this chapter) has no ExternalName mode at all.
+
 ```bash
 kubectl create service externalname my-external-db \
   --external-name mydb.prod.rds.amazonaws.com
@@ -510,6 +555,9 @@ kubectl delete svc my-external-db
 
 ### Step 7: Final Cleanup
 
+Tear down everything created in Steps 1–2 (Steps 5–6 already cleaned up
+their own throwaway objects as they went).
+
 ```bash
 kubectl delete -f 03-externalname-svc.yaml
 kubectl delete -f 02-backend-svc.yaml
@@ -540,7 +588,12 @@ In this lab, you:
 cd src/break-fix/
 ```
 
-### Error-1
+### Error-1 — "I added a selector as a fallback, but nothing seems to use it"
+
+**The scenario:** wanting some kind of safety net, a teammate added a
+`selector` and `ports` to an `ExternalName` Service, reasoning it might
+route to local pods if the external host is ever unreachable. Investigate
+whether that reasoning holds up.
 
 **`src/break-fix/01-selector-on-externalname.yaml`:**
 ```yaml
@@ -570,7 +623,8 @@ kubectl get endpointslices -l kubernetes.io/service-name=confused-externalname
 `ExternalName` Service — Kubernetes doesn't reject the combination — but
 neither field has any effect. ExternalName is pure DNS redirection; it
 never creates EndpointSlices and never routes based on a selector,
-regardless of what's written in the spec.
+regardless of what's written in the spec. There is no fallback behavior
+of any kind.
 
 **Fix:** Remove the `selector` and `ports` fields — they're not wrong in
 the sense of causing an error, but they're misleading clutter that
@@ -591,7 +645,12 @@ kubectl delete svc confused-externalname 2>/dev/null || true
 
 ---
 
-### Error-2
+### Error-2 — "The Service applied cleanly, but DNS never resolves it"
+
+**The scenario:** `externalName` was set by pasting a URL straight out of
+a browser address bar. `kubectl apply` succeeded with no complaints, but
+every lookup against the Service fails. Investigate what's actually in
+the field.
 
 **`src/break-fix/02-url-instead-of-hostname.yaml`:**
 ```yaml

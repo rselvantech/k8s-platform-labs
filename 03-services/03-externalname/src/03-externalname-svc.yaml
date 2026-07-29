@@ -4,4 +4,4 @@ metadata:
   name: database-svc
 spec:
   type: ExternalName
-  externalName: httpbin.org
+  externalName: httpbin.org   # bare hostname only — no scheme, no IP, see Step 5 and Break-Fix Error-2
