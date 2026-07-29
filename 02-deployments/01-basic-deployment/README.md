@@ -228,7 +228,7 @@ means:
 - Getting the `apiVersion` wrong is a schema-validation failure, not a
 subtle bug — `apiVersion: v1` on a `kind: Deployment` is rejected
 outright, since `v1` (core) has no `Deployment` kind at all.
-- `kubectl explain <kind>` (from `04-kubectl-essentials`) will show you the
+- `kubectl explain <kind>` (from `appendix-kubectl/01-kubectl-fundamentals`) will show you the
 correct `apiVersion` for any kind if you're ever unsure — this is
 exactly the kind of lookup `kubectl explain` exists for.
 
