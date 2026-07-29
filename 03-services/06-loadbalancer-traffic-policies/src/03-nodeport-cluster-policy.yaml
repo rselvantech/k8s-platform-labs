@@ -1,0 +1,13 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: backend-traffic-cluster
+spec:
+  type: NodePort
+  externalTrafficPolicy: Cluster   # explicit, though it's the default
+  selector:
+    app: backend
+  ports:
+    - port: 80
+      targetPort: 80
+      nodePort: 31100

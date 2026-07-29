@@ -55,7 +55,7 @@ By the end of this lab, you will be able to:
 4. ✅ Inspect iptables rules created by kube-proxy for a Service
 5. ✅ Observe how readiness affects endpoint registration
 6. ✅ Create a selectorless service with manual EndpointSlice
-7. ✅ Distinguish which pod actually answered a request — resolving the exact limitation `01-clusterip-nodeport` ran into
+7. ✅ Confirm load balancing is genuinely happening — reusing `01-clusterip-nodeport`'s per-pod distinguishing technique, this time to inspect the iptables mechanics actually producing the distribution
 
 ## Directory Structure
 
@@ -123,6 +123,8 @@ EndpointSlice API (current):
 > As of Kubernetes 1.33, `kubectl get endpoints` shows a deprecation
 > warning. Migrate scripts and tooling to `kubectl get endpointslices`.
 
+---
+
 ### kube-proxy — The Traffic Routing Engine
 
 Every node in a Kubernetes cluster runs a kube-proxy (unless you've
@@ -141,16 +143,20 @@ iptables  → default mode on most clusters
             uses random selection for load balancing
             scales to tens of thousands of rules in large clusters
 
-nftables  → modern replacement for iptables (v1.29+)
+nftables  → modern replacement for iptables (stable since v1.33)
             better performance than iptables
-            recommended for new clusters on modern kernels
+            currently recommended for new clusters on kernels 5.13+
+            still not the default — iptables remains the default mode
 
 ipvs      → Linux kernel IP Virtual Server
             hash table lookup — O(1) vs iptables O(n)
             multiple load balancing algorithms
-            better at very large scale (tens of thousands of Services)
-            not recommended for new clusters — nftables is preferred
+            DEPRECATED as of Kubernetes v1.35 — do not choose this
+            mode for a new cluster; nftables is the direct replacement
+            for ipvs's original "scale better than iptables" use case
 ```
+
+---
 
 ### How Traffic Reaches a Pod
 
@@ -171,13 +177,34 @@ It only programs the rules. The kernel handles all packet forwarding.
 
 ## Lab Step-by-Step Guide
 
+By the end of this walkthrough you'll have redeployed the same
+backend + ClusterIP pairing from `01-clusterip-nodeport`, but this time
+inspecting every layer underneath it directly: the EndpointSlice object
+tracking pod readiness, the actual iptables rules kube-proxy programs on
+a node, and — separately — a selectorless Service with a hand-written
+EndpointSlice pointing at something outside normal pod selection
+entirely. Steps 1–3 rebuild and inspect the standard case; Steps 4–5 go
+under the hood into kube-proxy and iptables; Step 6 covers the
+selectorless variant.
+
 ### Step 1: Deploy Backend and Service
+
+This step rebuilds the same shape of backend + Service from
+`01-clusterip-nodeport` — nothing new in the objects themselves — since
+every later step in this demo needs a working Service to inspect.
 
 ```bash
 cd 03-services/02-service-internals/src
 ```
 
-**01-backend-deployment.yaml:**
+#### Backend Deployment
+
+Identical pattern to `01-clusterip-nodeport`'s backend, injecting the
+pod's own name into the response via the Downward API — see the note
+below the manifest for why this technique is reused here rather than
+being this demo's own contribution.
+
+**`01-backend-deployment.yaml`:**
 ```yaml
 apiVersion: apps/v1
 kind: Deployment
@@ -196,7 +223,7 @@ spec:
       terminationGracePeriodSeconds: 0
       containers:
         - name: backend
-          image: hashicorp/http-echo:0.2.3
+          image: hashicorp/http-echo:1.0.0
           args:
             - "-text=Hello from backend pod $(MY_POD_NAME)"
           env:
@@ -215,14 +242,19 @@ spec:
               memory: "64Mi"
 ```
 > `$(MY_POD_NAME)` in `args` injects the pod's own name into the response
-> text via the Downward API — so you can see exactly **which** pod
-> answered each request. This is the direct fix for the limitation
-> `01-clusterip-nodeport` ran into: every pod there returned the
-> identical static text, so load balancing was happening but genuinely
-> impossible to verify from response content alone. This demo's backend
-> is deliberately built to make it observable.
+> text via the Downward API — the same technique `01-clusterip-nodeport`
+> already used for both its backend and frontend, reused here for the
+> same reason: it makes load balancing directly observable in the
+> response, not just assumed from a successful request.
 
-**02-backend-svc.yaml:**
+#### Backend ClusterIP Service
+
+A plain ClusterIP Service selecting these pods — nothing different from
+`01-clusterip-nodeport`'s own backend Service. This demo's genuinely new
+content starts in Step 2, inspecting what's actually behind this
+familiar object.
+
+**`02-backend-svc.yaml`:**
 ```yaml
 apiVersion: v1
 kind: Service
@@ -244,7 +276,7 @@ kubectl rollout status deployment/backend-deploy
 kubectl get pods -l app=backend -o wide
 ```
 
-**Now verify load balancing is actually observable:**
+**Confirm load balancing is genuinely happening:**
 ```bash
 kubectl run netshoot --image=nicolaka/netshoot --rm -it --restart=Never \
   -- sh -c 'for i in $(seq 1 6); do curl -s backend-svc:9090; echo; done'
@@ -258,13 +290,19 @@ Hello from backend pod backend-deploy-xxxxxxxxx-ccccc
 Hello from backend pod backend-deploy-xxxxxxxxx-bbbbb
 Hello from backend pod backend-deploy-xxxxxxxxx-aaaaa
 ```
-This is the confirmation `01-clusterip-nodeport` couldn't give you —
-requests genuinely are being distributed across different pods, not just
-succeeding repeatedly against one.
+Same confirmation `01-clusterip-nodeport` already gave you — requests
+genuinely are being distributed across different pods, not just
+succeeding repeatedly against one. Worth re-confirming here since the
+rest of this demo is about to explain exactly *how*.
 
 ---
 
 ### Step 2: Inspect EndpointSlices
+
+This step looks at the actual object behind everything
+`01-clusterip-nodeport` observed only indirectly through `kubectl get
+endpoints` — the EndpointSlice, including fields (readiness, node
+placement, ownership) that older view never exposed.
 
 ```bash
 kubectl get endpointslices -l kubernetes.io/service-name=backend-svc
@@ -362,6 +400,10 @@ kubectl get endpointslices -l kubernetes.io/service-name=backend-svc
 
 ### Step 4: Verify kube-proxy is Running
 
+Before inspecting the actual iptables rules in Step 5, this step
+confirms the component that programs them is running on every node and
+identifies which mode it's using.
+
 ```bash
 kubectl get pods -n kube-system | grep kube-proxy
 ```
@@ -453,15 +495,17 @@ exit
 
 ---
 
-### Step 6: Selectorless Service — Manual Endpoint Management
+### Step 6: Selectorless Service — Manual EndpointSlice Management
 
-A selectorless service has no `selector` field. You manually define which
-endpoints it routes to. Useful for:
-- External databases outside the cluster
-- Services in another namespace or cluster
-- Legacy systems with static IPs
+A selectorless Service has no `selector` field — you manually define
+which endpoints it routes to, via a hand-written EndpointSlice instead
+of one the endpointslice-controller generates for you. Useful for
+external databases outside the cluster, Services in another namespace or
+cluster, and legacy systems with static IPs. This is the genuinely new
+object pairing this demo introduces, in contrast to Step 1's rebuild of
+already-familiar objects.
 
-**03-selectorless-svc.yaml:**
+**`03-selectorless-svc.yaml`:**
 ```yaml
 apiVersion: v1
 kind: Service
@@ -479,7 +523,7 @@ kind: EndpointSlice
 metadata:
   name: external-db-svc-endpoints
   labels:
-    kubernetes.io/service-name: external-db-svc
+    kubernetes.io/service-name: external-db-svc   # links this slice to the Service above
 addressType: IPv4
 protocol: TCP
 ports:
@@ -489,8 +533,17 @@ endpoints:
   - addresses:
       - "10.240.0.50"    # IP of external database server
     conditions:
-      ready: true
+      ready: true         # must be explicit — nothing computes this for you
 ```
+
+| Object | Field | Required / Default | Description |
+|---|---|---|---|
+| Service | `spec.selector` | Omitted entirely | The defining feature of this pattern — no selector means no automatic EndpointSlice generation |
+| Service | `spec.ports[]` | Yes | Must match the EndpointSlice's own `ports[]` below for routing to work |
+| EndpointSlice | `metadata.labels.kubernetes.io/service-name` | Yes | The only thing linking this EndpointSlice to the Service — get this wrong and the Service has no endpoints at all, with no error |
+| EndpointSlice | `addressType` | Yes | `IPv4` here; also supports `IPv6` and `FQDN` |
+| EndpointSlice | `endpoints[].addresses` | Yes | The actual external IP(s) — this is what you update if the external target moves |
+| EndpointSlice | `endpoints[].conditions.ready` | No — but effectively required | Unlike a selector-based EndpointSlice, nothing computes this for you; omitting it is not the same as `true` |
 
 ```bash
 kubectl apply -f 03-selectorless-svc.yaml
@@ -529,7 +582,7 @@ kubectl delete -f 01-backend-deployment.yaml
 In this lab, you:
 - ✅ Inspected EndpointSlices and understood all fields (Ready, Serving, Terminating, NodeName)
 - ✅ Compared EndpointSlice vs the deprecated Endpoints API `01-clusterip-nodeport` used
-- ✅ Verified load balancing is genuinely happening, using distinguishable per-pod responses — resolving that demo's exact observability limitation
+- ✅ Reconfirmed load balancing using the same distinguishable per-pod responses from `01-clusterip-nodeport`, this time explaining the iptables mechanics that actually produce it
 - ✅ Observed readiness affecting endpoint registration in real time
 - ✅ Verified kube-proxy is running on every node, including the control plane, and why
 - ✅ Inspected iptables DNAT rules that kube-proxy creates
@@ -544,10 +597,19 @@ In this lab, you:
 cd src/break-fix/
 ```
 
-### Error-1
+### Error-1 — "A node's Services stop responding — is routing down?"
+
+**The scenario:** something on `3node-m02` looks wrong — a teammate
+reports Services routing through that node feel unreliable, and you
+notice `kube-proxy`'s pod on that node isn't the one that's been running
+since cluster start. Before assuming outages, investigate what's
+actually happening.
+
+This scenario needs nothing from the main lab still running — kube-proxy
+is a cluster-wide system DaemonSet that exists regardless of what
+application Services you've built.
 
 ```bash
-# Assumes backend-deploy and backend-svc from the main lab are still running
 kubectl get pods -n kube-system -l k8s-app=kube-proxy -o wide
 # Pick the kube-proxy pod running on 3node-m02 and delete it
 kubectl delete pod -n kube-system <kube-proxy-pod-on-3node-m02>
@@ -582,14 +644,64 @@ them" from this demo's own Concepts.
 
 ---
 
-### Error-2
+### Error-2 — "The Service's Endpoints just vanished — did something delete my pods?"
+
+**The scenario:** `kubectl get endpointslices` for a Service you were
+just using suddenly returns nothing. Your first instinct might be that
+the backing pods crashed or were deleted — check that assumption before
+acting on it.
 
 ```bash
-# Assumes backend-svc's EndpointSlice from the main lab still exists
-kubectl get endpointslices -l kubernetes.io/service-name=backend-svc
-# Delete it directly
-kubectl delete endpointslice -l kubernetes.io/service-name=backend-svc
-kubectl get endpointslices -l kubernetes.io/service-name=backend-svc
+# Self-contained: deploy a throwaway backend + Service for this scenario
+cat <<EOF | kubectl apply -f -
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: breakfix-backend
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: breakfix-backend
+  template:
+    metadata:
+      labels:
+        app: breakfix-backend
+    spec:
+      terminationGracePeriodSeconds: 0
+      containers:
+        - name: backend
+          image: hashicorp/http-echo:1.0.0
+          args:
+            - "-text=Hello from breakfix backend"
+          ports:
+            - containerPort: 5678
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "32Mi"
+            limits:
+              cpu: "100m"
+              memory: "64Mi"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: breakfix-backend-svc
+spec:
+  type: ClusterIP
+  selector:
+    app: breakfix-backend
+  ports:
+    - port: 9090
+      targetPort: 5678
+EOF
+kubectl rollout status deployment/breakfix-backend
+
+# Confirm the EndpointSlice exists, then delete it directly
+kubectl get endpointslices -l kubernetes.io/service-name=breakfix-backend-svc
+kubectl delete endpointslice -l kubernetes.io/service-name=breakfix-backend-svc
+kubectl get endpointslices -l kubernetes.io/service-name=breakfix-backend-svc
 ```
 
 <details>
@@ -601,7 +713,8 @@ authored by you — they're owned and continuously reconciled by the
 2's `describe` output. Deleting one doesn't leave the Service without
 endpoints; the controller notices the mismatch (Service has a selector,
 matching Ready pods exist, but no EndpointSlice reflects them) and
-recreates it, typically within seconds.
+recreates it, typically within seconds. The pods were never touched at
+all.
 
 **Fix:** Nothing to fix — expected self-healing, the same reconciliation
 pattern you've now seen at the Pod/ReplicaSet layer (`01-basic-deployment`),
@@ -626,7 +739,11 @@ own responsibility to maintain.
 
 </details>
 
-**Cleanup:** none needed — the endpointslice-controller already restored normal state for the selector-based case.
+**Cleanup:**
+```bash
+kubectl delete svc breakfix-backend-svc 2>/dev/null || true
+kubectl delete deployment breakfix-backend 2>/dev/null || true
+```
 
 ---
 
@@ -646,6 +763,9 @@ A: No — the endpointslice-controller recreates it almost immediately, since it
 
 **Q: Why does kube-proxy run on the control-plane node even though a taint prevents regular workloads from scheduling there?**
 A: kube-proxy is deployed as a DaemonSet with its own toleration for the control-plane taint — taints only block scheduling for pods that don't explicitly tolerate them, and system DaemonSets like kube-proxy are built to tolerate exactly this one.
+
+**Q: Should a new cluster be set up with `ipvs` mode for scale?**
+A: No — `ipvs` mode was formally deprecated in Kubernetes v1.35. `nftables` is the current, actively-developed answer to the same "scale better than iptables" problem `ipvs` originally solved, and is what's now recommended for new clusters on kernels that support it (5.13+).
 
 ---
 
@@ -667,6 +787,7 @@ A: kube-proxy is deployed as a DaemonSet with its own toleration for the control
 | Assuming a deleted EndpointSlice breaks a Service permanently | Only true for selectorless Services — selector-based ones self-heal via the endpointslice-controller |
 | Forgetting the `kubernetes.io/service-name` label for filtering EndpointSlices | Without it, `kubectl get endpointslices` returns every slice in the namespace, not just the one you care about |
 | Assuming kube-proxy doesn't run on the control plane | It does — as a DaemonSet with a toleration for the control-plane taint |
+| Assuming `ipvs` is still a safe choice for a new cluster | It was deprecated in Kubernetes v1.35 — `nftables` is the current recommendation for the same scale use case |
 
 ### Exam Task — Write it from scratch
 
@@ -701,6 +822,7 @@ kubectl logs -n kube-system -l k8s-app=kube-proxy | grep -i proxier
 | kube-proxy runs on every node, including the control plane | Via a DaemonSet-level toleration for the control-plane taint, distinct from how regular workload scheduling is blocked there |
 | iptables load balancing uses cascading probabilities | `probability 0.333`, then `0.500` of the remainder, then everything left — the math behind "equal distribution across 3 pods" |
 | Identical responses don't prove load balancing is broken | You need distinguishing data per pod (like this demo's `$(MY_POD_NAME)`) to actually observe routing, not just successful requests |
+| `ipvs` mode is deprecated (v1.35), not just "not recommended" | `nftables` is the current, actively-developed replacement for `ipvs`'s original large-scale use case |
 
 ---
 
@@ -741,7 +863,7 @@ for imperative Service creation.
 "What does Ready: false on an EndpointSlice entry mean for that pod?","It's excluded from load balancing — matching the Service's selector alone isn't enough, only Ready endpoints receive traffic","demo02-services,endpointslices,readiness,cka-services-networking"
 "How does iptables achieve roughly equal load distribution across 3 pod endpoints?","Cascading statistic-mode probabilities: 0.333 for the first, 0.500 of the remainder for the second, everything left for the third — netting out to roughly 1/3 each","demo02-services,iptables,load-balancing,cka-services-networking"
 "If every backend pod returns identical response text, does that prove load balancing isn't working?","No — it just means you can't observe it from response content; distinguishing data per pod (like an injected pod name) is needed to actually verify routing","demo02-services,load-balancing,debugging,cka-troubleshooting"
-"What kube-proxy modes exist on Linux, and which is currently recommended for new clusters?","iptables, nftables, and ipvs — nftables is the currently recommended mode for new clusters on modern kernels","demo02-services,kube-proxy,cka-services-networking"
+"What kube-proxy modes exist on Linux, and what is ipvs's current status?","iptables, nftables, and ipvs — ipvs was formally deprecated in Kubernetes v1.35; nftables is the currently recommended mode for new clusters on modern kernels","demo02-services,kube-proxy,cka-services-networking"
 ````
 
 ---
@@ -834,7 +956,7 @@ Trap: A assumes uniform behavior across both cases when they're actually fundame
 <details>
 <summary>Answer</summary>
 
-**B** — This is precisely the gap `01-clusterip-nodeport` ran into and this demo's backend was specifically built to resolve, by injecting the pod's own name into the response.
+**B** — Without distinguishing data per pod, successful requests alone can't tell you whether they hit one pod repeatedly or several — this is exactly why both this demo's and `01-clusterip-nodeport`'s backends inject the pod's own name into the response.
 Trap: C invents a responsibility for kube-proxy (modifying response content) that it has no role in at all — it only routes packets.
 
 </details>
@@ -875,18 +997,18 @@ Trap: A misreads the first probability as favoring that pod, without accounting 
 
 ---
 
-**Q8. Which kube-proxy mode is currently recommended for new clusters on modern kernels?**
+**Q8. What is `ipvs` mode's current status, as of Kubernetes v1.35?**
 
-- A) iptables, because it's the default
-- B) ipvs, because it scales best
-- C) nftables — better performance than iptables, the modern recommended choice
-- D) All three are equally recommended with no preference
+- A) It's the default mode for all new clusters
+- B) It was formally deprecated — `nftables` is the current recommendation for its original "scale better than iptables" use case
+- C) It was removed entirely and no longer exists
+- D) It's only usable on cloud-managed clusters now
 
 <details>
 <summary>Answer</summary>
 
-**C** — nftables is explicitly the currently recommended mode for new clusters, per this demo's own Concepts section.
-Trap: B is a plausible-sounding distractor since ipvs does scale well at very large size, but it's explicitly noted as not recommended for new clusters in favor of nftables.
+**B** — `ipvs` is deprecated as of v1.35, not simply "less preferred" — `nftables` (stable since v1.33) is the actively-developed answer to the same scaling problem `ipvs` was originally built to solve.
+Trap: C overstates the situation — deprecated is not the same as removed; existing clusters running `ipvs` aren't broken, but it shouldn't be chosen for a new one.
 
 </details>
 

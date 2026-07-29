@@ -61,6 +61,7 @@ By the end of this lab, you will be able to:
 4. ✅ Resolve individual StatefulSet pods by stable DNS name
 5. ✅ Explain when to use headless vs regular ClusterIP
 6. ✅ Explain the difference between stable pod *identity* (what StatefulSet gives) and stable pod *IP* (which no controller gives — pod IPs are always ephemeral)
+7. ✅ Explain what `publishNotReadyAddresses` does and why StatefulSets sometimes need it for peer discovery during startup
 
 ## Directory Structure
 
@@ -128,6 +129,8 @@ clusterIP: <omit>  → NOT headless — Kubernetes auto-assigns an IP
 > leaving the `.spec.clusterIP` field unset — this demo's Break-Fix
 > Error-2 is built around exactly this distinction.
 
+---
+
 ### DNS Behaviour — Headless vs Regular
 
 ```
@@ -146,6 +149,8 @@ StatefulSet with headless service:
   pod-1.headless-svc.default.svc.cluster.local → 10.244.2.3
   pod-2.headless-svc.default.svc.cluster.local → 10.244.1.8
 ```
+
+---
 
 ### Just Enough StatefulSet — Why It Needs a Headless Service
 
@@ -199,14 +204,56 @@ in this series so far, there is **no `kubectl create statefulset`**
 imperative subcommand at all — StatefulSets are YAML-only, no imperative
 shortcut exists.
 
+### publishNotReadyAddresses — Publishing DNS Before Readiness
+
+Everything so far has assumed the default: a pod only gets a DNS record
+once it's `Ready` — the exact same readiness-gating rule
+`01-clusterip-nodeport` established for regular Service Endpoints applies
+here too. For a headless Service, `spec.publishNotReadyAddresses: true`
+turns that off — DNS starts returning a pod's record the moment the pod
+exists, before it's passed any readiness check at all.
+
+This sounds like it defeats the purpose of readiness, but it solves a
+real, common StatefulSet problem: **peer discovery during startup.** A
+clustered database's first pod often needs to find and contact its
+sibling pods *before* any of them are individually ready to serve real
+traffic — that's exactly when they're negotiating who's primary, joining
+a raft/gossip cluster, or replicating initial state. If DNS only
+published Ready pods, a pod couldn't even discover its peers until they
+were already fully up — a chicken-and-egg problem for anything that
+needs peer coordination *before* readiness. `publishNotReadyAddresses` is
+what lets that discovery phase happen at all.
+
+```yaml
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: true   # DNS record exists immediately,
+                                    # not gated on readiness
+  selector:
+    app: mysql
+```
+
+This demo's own Step 5 (pod restart) demonstrates both sides of this
+directly — the default readiness-gated behavior, and what changes once
+`publishNotReadyAddresses` is set.
+
 ---
 
 ## Lab Step-by-Step Guide
 
+By the end of this walkthrough you'll have deployed the same backend
+behind two different Service objects — one regular ClusterIP, one
+headless — to see the DNS difference directly, then built a 3-pod MySQL
+StatefulSet behind its own headless Service to see the actual production
+use case: per-pod DNS names that stay valid even as pods restart and get
+new IPs. Steps 1–2 establish the headless-vs-regular contrast; Steps
+3–5 build and probe the StatefulSet case.
+
 ### Step 1: Compare Regular vs Headless DNS
 
-Deploy the same backend deployment twice — one with a regular ClusterIP
-service and one with a headless service:
+This step sets up the contrast the rest of the demo depends on — the
+exact same backend pods, reachable through two different Services, so
+Step 2 can query both and see the DNS difference directly.
 
 ```bash
 cd 03-services/04-headless/src
@@ -230,7 +277,7 @@ spec:
       terminationGracePeriodSeconds: 0
       containers:
         - name: backend
-          image: hashicorp/http-echo:0.2.3
+          image: hashicorp/http-echo:1.0.0
           args:
             - "-text=hello"
           ports:
@@ -247,7 +294,12 @@ EOF
 kubectl rollout status deployment/backend-deploy
 ```
 
-**01-regular-svc.yaml:**
+#### Regular ClusterIP Service
+
+A plain ClusterIP Service, identical in shape to every prior demo's —
+its only role here is being the "before" side of Step 2's comparison.
+
+**`01-regular-svc.yaml`:**
 ```yaml
 apiVersion: v1
 kind: Service
@@ -262,7 +314,13 @@ spec:
       targetPort: 5678
 ```
 
-**02-headless-svc.yaml:**
+#### Headless Service
+
+This demo's actual subject — a ClusterIP Service with `clusterIP: None`,
+which (per Concepts above) skips virtual-IP/kube-proxy routing entirely
+in favor of DNS returning pod IPs directly.
+
+**`02-headless-svc.yaml`:**
 ```yaml
 apiVersion: v1
 kind: Service
@@ -270,13 +328,19 @@ metadata:
   name: backend-headless
 spec:
   type: ClusterIP
-  clusterIP: None        # ← headless
+  clusterIP: None        # the literal string "None" — not "" — is what makes this headless
   selector:
     app: backend
   ports:
     - port: 5678
       targetPort: 5678
 ```
+
+| Field | Required / Default | Description |
+|---|---|---|
+| `spec.type` | No — defaults to `ClusterIP` | Set explicitly for clarity, same as a regular ClusterIP Service |
+| `spec.clusterIP` | Yes — must be the literal string `None` | The entire mechanism — `""` or omitting the field both mean "auto-assign," not headless. See this demo's Break-Fix Error-2 |
+| `spec.selector` | Yes | Same role as any selector-based Service — determines which pods' IPs DNS returns |
 
 ```bash
 kubectl apply -f 01-regular-svc.yaml
@@ -298,6 +362,9 @@ backend-regular:  CLUSTER-IP=10.96.xxx.xxx → regular ClusterIP
 ---
 
 ### Step 2: Verify DNS Difference
+
+This step is the payoff of Step 1's setup — querying both Services'
+names from the same pod to see the actual DNS response shape differ.
 
 ```bash
 kubectl run netshoot --image=nicolaka/netshoot --rm -it --restart=Never -- bash
@@ -354,9 +421,21 @@ exit
 
 ### Step 3: StatefulSet with Headless Service
 
-This is the primary production use case for headless services.
+This step builds the actual production pairing Step 1–2 were building
+toward — a StatefulSet whose pods get individually-resolvable, stable
+DNS names via its own dedicated headless Service.
 
-**03-statefulset.yaml:**
+#### MySQL StatefulSet and Headless Service
+
+The headless Service here is functionally identical to Step 1's
+`backend-headless` — what's new is the StatefulSet itself: ordered pod
+creation (`mysql-0`, `mysql-1`, `mysql-2`, in that order), and the
+`serviceName` field that links it to the headless Service above it in
+this same file. The `readinessProbe`'s `initialDelaySeconds: 25` is not
+a real health check — it's purely so Step 5 has a predictable window to
+observe DNS behavior during a pod's not-yet-Ready state.
+
+**`03-statefulset.yaml`:**
 ```yaml
 apiVersion: v1
 kind: Service
@@ -377,7 +456,7 @@ kind: StatefulSet
 metadata:
   name: mysql
 spec:
-  serviceName: mysql-headless   # ← links to headless service, see Concepts above
+  serviceName: mysql-headless   # links to the headless Service above — see Concepts
   replicas: 3
   selector:
     matchLabels:
@@ -390,7 +469,7 @@ spec:
       terminationGracePeriodSeconds: 0
       containers:
         - name: mysql
-          image: hashicorp/http-echo:0.2.3
+          image: hashicorp/http-echo:1.0.0
           args:
             - "-text=Response from $(MY_POD_NAME)"
             - "-listen=:3306"
@@ -401,6 +480,13 @@ spec:
                   fieldPath: metadata.name
           ports:
             - containerPort: 3306
+          readinessProbe:
+            exec:
+              command: ["true"]
+            initialDelaySeconds: 25   # predictable ~25s "not Ready" window,
+                                       # purely so Step 5 can observe DNS
+                                       # behavior during it — not a real
+                                       # health check
           resources:
             requests:
               cpu: "50m"
@@ -409,6 +495,14 @@ spec:
               cpu: "100m"
               memory: "64Mi"
 ```
+
+| Object | Field | Required / Default | Description |
+|---|---|---|---|
+| Service | `spec.clusterIP` | Yes — literal `None` | Same headless mechanism from Step 1, reused here |
+| Service | `ports[].name` | No, unless multi-port | Set here (`mysql`) as good practice, though this Service only has one port |
+| StatefulSet | `spec.serviceName` | Yes | Must match the headless Service's `metadata.name` exactly — not validated at apply time, see this demo's Break-Fix Error-1 |
+| StatefulSet | `spec.replicas` | Yes | Same field as a Deployment, but creates pods in order (`mysql-0` → `mysql-1` → `mysql-2`), never all at once |
+| StatefulSet | `readinessProbe.initialDelaySeconds` | No — defaults to `0` | Demo-specific: set to 25 purely to make Step 5's readiness-gated DNS behavior observable |
 
 ```bash
 kubectl apply -f 03-statefulset.yaml
@@ -431,6 +525,10 @@ mysql-2   1/1     Running   3node-m02
 ---
 
 ### Step 4: Resolve Individual StatefulSet Pods by DNS
+
+This step proves the actual production payoff of Step 3's setup —
+resolving one specific pod by name, not just the whole StatefulSet's
+pod IPs together.
 
 ```bash
 kubectl run netshoot --image=nicolaka/netshoot --rm -it --restart=Never -- bash
@@ -539,9 +637,53 @@ Name:   mysql-1.mysql-headless.default.svc.cluster.local
 Address: 10.244.x.x   ← new IP after restart, same DNS name ✅
 ```
 
+**Now observe the default readiness-gating behavior directly.** The
+`readinessProbe` added in Step 3 delays readiness by ~25 seconds — repeat
+the delete, but this time query DNS immediately, before the probe would
+have passed:
+
+```bash
+kubectl delete pod mysql-1 --grace-period=0 --force
+# immediately, don't wait:
+kubectl run netshoot --image=nicolaka/netshoot --rm -it --restart=Never \
+  -- nslookup mysql-1.mysql-headless
+```
+**Expected output — likely no record yet, or a `NXDOMAIN`-style failure:**
+```
+** server can't find mysql-1.mysql-headless.default.svc.cluster.local: NXDOMAIN
+```
+This is `publishNotReadyAddresses` currently at its default (`false`,
+since Step 3's YAML never set it) — the new `mysql-1` pod exists but
+isn't `Ready` yet, so it has no DNS record at all until the ~25s probe
+delay passes.
+
+**Now turn `publishNotReadyAddresses` on and repeat:**
+```bash
+kubectl patch svc mysql-headless -p '{"spec":{"publishNotReadyAddresses":true}}'
+kubectl delete pod mysql-1 --grace-period=0 --force
+# immediately again:
+kubectl run netshoot --image=nicolaka/netshoot --rm -it --restart=Never \
+  -- nslookup mysql-1.mysql-headless
+```
+**Expected output — resolves immediately, despite not being Ready:**
+```
+Name:   mysql-1.mysql-headless.default.svc.cluster.local
+Address: 10.244.x.x   ← the NEW pod's IP, published before readiness ✅
+```
+Same pod, same restart, only the Service's
+`publishNotReadyAddresses` value changed — that's the entire mechanism
+from Concepts above, made directly observable.
+
+```bash
+# Revert to the default before moving on
+kubectl patch svc mysql-headless -p '{"spec":{"publishNotReadyAddresses":false}}'
+```
+
 ---
 
 ### Step 6: Final Cleanup
+
+Tear down everything created in Steps 1–3.
 
 ```bash
 kubectl delete -f 03-statefulset.yaml
@@ -566,6 +708,7 @@ In this lab, you:
 - ✅ Understood just enough StatefulSet to explain the ordered, stable pod naming and the `serviceName` link
 - ✅ Resolved individual pods by stable DNS name (`pod-0.svc`, `pod-1.svc`)
 - ✅ Verified the DNS name remains stable across a pod restart — while the underlying IP still changes, exactly as pod IP ephemerality (`01-core-concepts`) predicts
+- ✅ Observed `publishNotReadyAddresses` directly — the same restart with it off (NXDOMAIN during the readiness delay) vs on (resolves immediately)
 
 ---
 
@@ -575,7 +718,12 @@ In this lab, you:
 cd src/break-fix/
 ```
 
-### Error-1
+### Error-1 — "Per-pod DNS never resolves, but the StatefulSet looks fine"
+
+**The scenario:** `kubectl get statefulset` and `kubectl get pods` both
+report everything healthy, `mysql-0`/`mysql-1` exist with the expected
+names — but nothing can resolve `mysql-0.mysql-headless` or reach the
+pods by their per-pod DNS names. Investigate what's actually missing.
 
 **`src/break-fix/01-servicename-mismatch.yaml`:**
 ```yaml
@@ -597,7 +745,7 @@ spec:
       terminationGracePeriodSeconds: 0
       containers:
         - name: mysql
-          image: hashicorp/http-echo:0.2.3
+          image: hashicorp/http-echo:1.0.0
           args:
             - "-text=hello"
           ports:
@@ -615,8 +763,12 @@ kubectl run netshoot --image=nicolaka/netshoot --rm -it --restart=Never -- nsloo
 
 **Cause:** Kubernetes does **not** validate at apply time that
 `spec.serviceName` actually refers to an existing Service, let alone a
-headless one. The StatefulSet is accepted, and — this is the trap — the
-**pods still get created successfully**, with the expected stable names
+headless one — this is documented as a requirement ("this service must
+exist before the StatefulSet") but not API-enforced; only external
+tooling like Helm's strict schema validation checks the field is
+*present*, and nothing checks it points at something real. The
+StatefulSet is accepted, and — this is the trap — the **pods still get
+created successfully**, with the expected stable names
 (`broken-mysql-0`, `broken-mysql-1`). Everything in `kubectl get pods`
 looks completely healthy.
 
@@ -642,7 +794,16 @@ kubectl delete statefulset broken-mysql 2>/dev/null || true
 
 ---
 
-### Error-2
+### Error-2 — "The Service was meant to be headless, but something's routing through it"
+
+**The scenario:** a Service was written with the intent of being
+headless — the author remembers setting `clusterIP` to "nothing" — but
+`kubectl get svc` shows a real allocated IP instead of `None`. Find what
+was actually written.
+
+This scenario is self-contained — it doesn't need pods to exist at all;
+the symptom it demonstrates (`kubectl get svc` showing an allocated
+`CLUSTER-IP`) is visible the moment the Service itself is created.
 
 **`src/break-fix/02-clusterip-empty-string.yaml`:**
 ```yaml
@@ -661,7 +822,6 @@ spec:
 ```
 
 ```bash
-# Assumes backend-deploy from the main lab is still running
 kubectl apply -f 02-clusterip-empty-string.yaml
 kubectl get svc fake-headless
 ```
@@ -714,6 +874,9 @@ A: No — there's no validation linking the two at apply time. The StatefulSet a
 **Q: Why does StatefulSet require a headless service specifically, rather than a regular ClusterIP one?**
 A: A regular ClusterIP would just load-balance across all the pods behind a single virtual IP — exactly what you *don't* want when the whole point is addressing one specific, named pod directly. Headless skips the virtual IP entirely so DNS can expose each pod's real IP individually.
 
+**Q: A clustered database's pods need to find each other before any of them pass their own readiness check. What Service field addresses this?**
+A: `publishNotReadyAddresses: true` on the headless Service — it publishes a pod's DNS record the moment the pod exists, without waiting for readiness. Without it, pods can't discover each other via DNS until they're already individually ready, which is a chicken-and-egg problem for anything doing peer coordination (leader election, cluster join) during startup.
+
 ---
 
 ## CKA/CKAD Certification Tips
@@ -734,6 +897,7 @@ A: A regular ClusterIP would just load-balance across all the pods behind a sing
 | Assuming `serviceName` is validated against a real Service | It isn't — a typo or nonexistent target still lets the StatefulSet and its pods create successfully, only DNS silently fails |
 | Trying `kubectl create statefulset` | Doesn't exist — StatefulSets are YAML-only, unlike Deployments/Services/Jobs which all have imperative creation |
 | Forgetting the per-pod DNS format | `<pod-name>.<service-name>.<namespace>.svc.cluster.local` — all four parts matter |
+| Assuming a not-yet-Ready pod never has a DNS record | True only by default — `publishNotReadyAddresses: true` on the headless Service changes that, for peer-discovery-before-readiness scenarios |
 
 ### Exam Task — Write it from scratch
 
@@ -773,7 +937,7 @@ spec:
     spec:
       containers:
         - name: web
-          image: nginx:1.27
+          image: nginx:1.30.4
 ```
 ```bash
 kubectl apply -f web.yaml
@@ -798,6 +962,7 @@ kubectl run netshoot --image=nicolaka/netshoot --rm -it --restart=Never -- nsloo
 | There's no `kubectl create statefulset` | YAML-only — no imperative shortcut exists for this object type |
 | A headless Service works with a Deployment too, just not usefully for per-pod addressing | Deployment pod names are random, so stable per-pod DNS names have nothing meaningful to attach to |
 | A missing/wrong `serviceName` is a silent failure, not a startup error | Pods and StatefulSet both report healthy — only DNS resolution actually breaks |
+| `publishNotReadyAddresses: true` publishes DNS before readiness | Solves the peer-discovery-during-startup problem — pods can find each other via DNS before any of them individually pass readiness |
 
 ---
 
@@ -819,7 +984,7 @@ Not applicable to the StatefulSet portion of this demo — there is no
 has nothing to generate against for this object type. The headless
 Service itself can still be generated via `kubectl create service
 clusterip NAME --clusterip="None" --tcp=PORT --dry-run=client -o yaml`,
-same technique as `01-core-concepts/04-kubectl-essentials`.
+same technique as `appendix-kubectl/01-kubectl-fundamentals`.
 
 ---
 
@@ -841,6 +1006,7 @@ same technique as `01-core-concepts/04-kubectl-essentials`.
 "Can a headless Service be used with a regular Deployment instead of a StatefulSet?","Yes — DNS returns all pod IPs either way, but Deployment pod names are random, so per-pod DNS addressing isn't meaningful without a StatefulSet's stable names","demo04-services,headless,deployment,cka-services-networking"
 "Why does StatefulSet need a headless Service instead of a regular ClusterIP one?","A regular ClusterIP load-balances across all pods behind one virtual IP — the opposite of what's needed when the goal is addressing one specific named pod directly","demo04-services,statefulset,headless,cka-services-networking"
 "Are StatefulSet pods created all at once or in order?","In order — mysql-0 before mysql-1 before mysql-2 — unlike a Deployment's ReplicaSet, which creates all replicas without a guaranteed sequence","demo04-services,statefulset,cka-workloads-scheduling"
+"What does publishNotReadyAddresses: true do on a headless Service?","Publishes a pod's DNS record immediately, without waiting for readiness — solves peer-discovery-during-startup for clustered apps that need to find each other before any individual pod is ready","demo04-services,headless,statefulset,cka-services-networking"
 ````
 
 ---
@@ -989,11 +1155,28 @@ Trap: A is factually wrong and D dismisses a real architectural reason as arbitr
 
 </details>
 
+---
+
+**Q9. What problem does `publishNotReadyAddresses: true` solve on a headless Service?**
+
+- A) It makes unready pods pass their readiness check faster
+- B) It publishes a pod's DNS record before it's Ready, enabling peer discovery during startup
+- C) It removes the readiness requirement permanently for all future pods
+- D) It's required for any StatefulSet with more than 1 replica
+
+<details>
+<summary>Answer</summary>
+
+**B** — Without it, DNS only publishes Ready pods, which creates a chicken-and-egg problem for clustered apps that need to find their peers *before* any of them are individually ready.
+Trap: A misreads this as affecting the readiness check itself — it only affects DNS publication, never touches the actual readiness probe or its result.
+
+</details>
+
 Score guide:
 | Score | Action |
 |---|---|
-| 8/8 | Import Anki cards, move to next Demo |
-| 7/8 | Review the wrong answer, then proceed |
-| 6/8 | Re-read the relevant section, retry those questions |
-| Below 6/8 | Re-read the full demo and redo the walkthrough before proceeding |
+| 9/9 | Import Anki cards, move to next Demo |
+| 8/9 | Review the wrong answer, then proceed |
+| 6-7/9 | Re-read the relevant section, retry those questions |
+| Below 6/9 | Re-read the full demo and redo the walkthrough before proceeding |
 ````

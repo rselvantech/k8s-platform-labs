@@ -92,7 +92,7 @@ By the end of this lab, you will be able to:
 
 ---
 
-## Recall Check — 03-deployment-strategies
+## Recall Check — 02-deployments/03-deployment-strategies
 
 Answer from memory before continuing — no peeking at the previous demo.
 
@@ -1035,7 +1035,7 @@ spec:
 
 > `--dry-run=client -o yaml` generates the manifest without creating
 > the resource, exactly the technique already covered in
-> `01-core-concepts/04-kubectl-essentials` — useful here for adding
+> `appendix-kubectl/01-kubectl-fundamentals` — useful here for adding
 > fields not available imperatively (e.g. a fixed `nodePort` value).
 
 **Cleanup imperative services:**
@@ -1296,21 +1296,21 @@ A: A `port`/`targetPort` swap — the Service can have perfectly healthy, correc
 
 ### Exam Objective Mapping
 
-| Domain                 | Exam | Weight | Covered here                                    |
-| ---------------------- | ---- | ------ | ----------------------------------------------- |
-| Services & Networking  | CKA  | 20%    | ClusterIP, NodePort, port/targetPort, selectors |
-| Services & Networking  | CKAD | —      | Service creation, imperative `kubectl expose`   |
-| Application Deployment | CKAD | —      | Connecting a Deployment to a Service via labels |
+| Domain | Exam | Weight | Covered here |
+|---|---|---|---|
+| Services & Networking | CKA | 20% | ClusterIP, NodePort, port/targetPort, selectors |
+| Services & Networking | CKAD | — | Service creation, imperative `kubectl expose` |
+| Application Deployment | CKAD | — | Connecting a Deployment to a Service via labels |
 
 ### Common Exam Traps
 
-| Trap                                                                | Why it trips people up                                                                                                                     |
-| ------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
-| Confusing `port` and `targetPort`                                   | Easy to write them backwards under time pressure — the Service still applies without error, just silently forwards to the wrong place      |
-| A selector typo                                                     | Valid YAML, silently matches zero pods — no error message points at the cause; always cross-check against `kubectl get pods --show-labels` |
-| Assuming `EXTERNAL-IP: <none>` means the Service is broken          | It's expected and correct for both ClusterIP and NodePort — only `LoadBalancer` populates this field                                       |
-| Forgetting NodePort's range is 30000-32767                          | Specifying a `nodePort` outside this range is rejected outright                                                                            |
-| Not checking `kubectl get endpoints` when a Service "isn't working" | Empty endpoints is the single fastest signal that the selector, not the network, is the problem                                            |
+| Trap | Why it trips people up |
+|---|---|
+| Confusing `port` and `targetPort` | Easy to write them backwards under time pressure — the Service still applies without error, just silently forwards to the wrong place |
+| A selector typo | Valid YAML, silently matches zero pods — no error message points at the cause; always cross-check against `kubectl get pods --show-labels` |
+| Assuming `EXTERNAL-IP: <none>` means the Service is broken | It's expected and correct for both ClusterIP and NodePort — only `LoadBalancer` populates this field |
+| Forgetting NodePort's range is 30000-32767 | Specifying a `nodePort` outside this range is rejected outright |
+| Not checking `kubectl get endpoints` when a Service "isn't working" | Empty endpoints is the single fastest signal that the selector, not the network, is the problem |
 
 ### Exam Task — Write it from scratch
 
@@ -1337,31 +1337,31 @@ kubectl get svc web
 
 ## Key Takeaways
 
-| Concept                                                        | Detail                                                                                        |
-| -------------------------------------------------------------- | --------------------------------------------------------------------------------------------- |
-| A Service's stable identity solves pod ephemerality            | Pods get new IPs on every restart; a Service's ClusterIP and DNS name never change            |
-| `port` vs `targetPort` are two different things                | `port` is what clients use; `targetPort` is what the container actually listens on            |
-| NodePort is built on top of ClusterIP, not instead of it       | Every NodePort Service also gets a ClusterIP automatically                                    |
-| NodePort opens the same port on every node                     | Regardless of which node actually runs a matching pod                                         |
-| A selector typo is silent                                      | Valid YAML, zero matching pods, no error — check `get endpoints` and `get pods --show-labels` |
-| Only Ready pods become Endpoints                               | Matching the selector alone isn't sufficient                                                  |
+| Concept | Detail |
+|---|---|
+| A Service's stable identity solves pod ephemerality | Pods get new IPs on every restart; a Service's ClusterIP and DNS name never change |
+| `port` vs `targetPort` are two different things | `port` is what clients use; `targetPort` is what the container actually listens on |
+| NodePort is built on top of ClusterIP, not instead of it | Every NodePort Service also gets a ClusterIP automatically |
+| NodePort opens the same port on every node | Regardless of which node actually runs a matching pod |
+| A selector typo is silent | Valid YAML, zero matching pods, no error — check `get endpoints` and `get pods --show-labels` |
+| Only Ready pods become Endpoints | Matching the selector alone isn't sufficient |
 | `port`/`targetPort` mismatches are invisible in `describe svc` | The Service looks correctly configured even when it's forwarding to a port nothing listens on |
-| `EXTERNAL-IP: <none>` is normal for ClusterIP and NodePort     | Only `LoadBalancer` populates this field                                                      |
+| `EXTERNAL-IP: <none>` is normal for ClusterIP and NodePort | Only `LoadBalancer` populates this field |
 
 ---
 
 ## Quick Commands Reference
 
-| Command                                                                          | Description                              |
-| -------------------------------------------------------------------------------- | ---------------------------------------- |
-| `kubectl get svc`                                                                | List all services                        |
-| `kubectl describe svc <name>`                                                    | Show service details including endpoints |
-| `kubectl get endpoints <name>`                                                   | Show pod IPs registered as endpoints     |
-| `kubectl expose deployment <name> --type=ClusterIP --port=<p> --target-port=<p>` | Create ClusterIP imperatively            |
-| `kubectl expose deployment <name> --type=NodePort --port=<p>`                    | Create NodePort imperatively             |
-| `minikube service <name> -p 3node --url`                                         | Get NodePort URL on minikube             |
-| `kubectl get nodes -o wide`                                                      | Show node IPs for NodePort access        |
-| `kubectl explain svc.spec`                                                       | Browse Service spec field docs           |
+| Command | Description |
+|---------|-------------|
+| `kubectl get svc` | List all services |
+| `kubectl describe svc <name>` | Show service details including endpoints |
+| `kubectl get endpoints <name>` | Show pod IPs registered as endpoints |
+| `kubectl expose deployment <name> --type=ClusterIP --port=<p> --target-port=<p>` | Create ClusterIP imperatively |
+| `kubectl expose deployment <name> --type=NodePort --port=<p>` | Create NodePort imperatively |
+| `minikube service <name> -p 3node --url` | Get NodePort URL on minikube |
+| `kubectl get nodes -o wide` | Show node IPs for NodePort access |
+| `kubectl explain svc.spec` | Browse Service spec field docs |
 
 ### Generating YAML skeletons with --dry-run
 
@@ -1373,10 +1373,10 @@ See `appendix-kubectl/01-kubectl-fundamentals` for the full canonical `--dry-run
 
 ### Imperative Quick-Create Commands
 
-| Object              | Imperative command                                        | Notes                                             |
-| ------------------- | --------------------------------------------------------- | ------------------------------------------------- |
+| Object | Imperative command | Notes |
+|---|---|---|
 | Service (ClusterIP) | `kubectl expose deployment NAME --port=P --target-port=P` | `--type=ClusterIP` is the default, can be omitted |
-| Service (NodePort)  | `kubectl expose deployment NAME --port=P --type=NodePort` | `nodePort` auto-assigned unless set via YAML      |
+| Service (NodePort) | `kubectl expose deployment NAME --port=P --type=NodePort` | `nodePort` auto-assigned unless set via YAML |
 
 ---
 
@@ -1456,9 +1456,10 @@ kubectl get pods -l <selector> -o wide
 
 ## Appendix — Quiz
 
-**`01-clusterip-nodeport-quiz.csv`:**
+**`01-clusterip-nodeport-quiz.md`:**
 
-```markdown
+
+````markdown
 # Quiz — 03-services/01-clusterip-nodeport: ClusterIP and NodePort Services
 
 > One correct answer per question unless stated otherwise.
@@ -1622,4 +1623,4 @@ Score guide:
 | 8/9 | Review the wrong answer, then proceed |
 | 6-7/9 | Re-read the relevant section, retry those questions |
 | Below 6/9 | Re-read the full demo and redo the walkthrough before proceeding |
-```
+````

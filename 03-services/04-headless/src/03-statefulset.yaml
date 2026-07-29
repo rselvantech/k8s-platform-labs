@@ -1,0 +1,57 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: mysql-headless
+spec:
+  type: ClusterIP
+  clusterIP: None
+  selector:
+    app: mysql
+  ports:
+    - port: 3306
+      targetPort: 3306
+      name: mysql
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: mysql
+spec:
+  serviceName: mysql-headless   # links to the headless Service above — see Concepts
+  replicas: 3
+  selector:
+    matchLabels:
+      app: mysql
+  template:
+    metadata:
+      labels:
+        app: mysql
+    spec:
+      terminationGracePeriodSeconds: 0
+      containers:
+        - name: mysql
+          image: hashicorp/http-echo:1.0.0
+          args:
+            - "-text=Response from $(MY_POD_NAME)"
+            - "-listen=:3306"
+          env:
+            - name: MY_POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+          ports:
+            - containerPort: 3306
+          readinessProbe:
+            exec:
+              command: ["true"]
+            initialDelaySeconds: 25   # predictable ~25s "not Ready" window,
+                                       # purely so Step 5 can observe DNS
+                                       # behavior during it — not a real
+                                       # health check
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "32Mi"
+            limits:
+              cpu: "100m"
+              memory: "64Mi"

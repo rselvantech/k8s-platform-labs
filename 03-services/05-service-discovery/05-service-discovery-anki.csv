@@ -1,0 +1,15 @@
+#deck:k8s-platform-labs::03-services::05-service-discovery
+#separator:Comma
+#columns:Front,Back,Tags
+"What is the fixed DNS name format for a Kubernetes Service?","<service-name>.<namespace>.svc.<cluster-domain>","demo05-services,dns,cka-services-networking"
+"What does ndots:5 actually control?","Whether search domains are tried before querying a name as-is — fewer dots than 5 means search domains get tried first","demo05-services,dns,ndots,cka-services-networking"
+"Why does a bare short service name fail across namespaces?","The pod's search domains only include its OWN namespace — CoreDNS never even receives a query for the other namespace's version unless it's included explicitly","demo05-services,dns,cross-namespace,cka-services-networking"
+"Does the CoreDNS reload plugin validate a new Corefile before applying it?","No — an invalid Corefile crashes CoreDNS on reload rather than being rejected gracefully","demo05-services,coredns,cka-troubleshooting"
+"Are Service environment variables always current?","No — only injected for Services that existed before the pod started; DNS is always current by comparison","demo05-services,service-env-vars,cka-services-networking"
+"Is dnsPolicy: Default actually the default policy?","No, confusingly — ClusterFirst is the actual default; Default means the pod uses the NODE's DNS instead of CoreDNS","demo05-services,dns-policy,cka-services-networking"
+"What does dnsPolicy: None require that the other policies don't?","A fully manual dnsConfig — nameservers, search domains, and options are all your own responsibility, nothing is injected automatically","demo05-services,dns-policy,cka-services-networking"
+"What problem does dnsPolicy: ClusterFirstWithHostNet solve?","A pod running with hostNetwork: true would otherwise lose cluster-name resolution — this policy forces ClusterFirst-style behavior back on for that case","demo05-services,dns-policy,hostnetwork,cka-services-networking"
+"A single Service name returns NXDOMAIN, but nslookup kubernetes.default works. What does that narrow down?","CoreDNS itself is healthy — the problem is specific to that Service: wrong namespace, doesn't exist, or no Ready pods","demo05-services,troubleshooting,cka-troubleshooting"
+"What's the blast radius when CoreDNS itself crashes vs. when a single Service is misconfigured?","CoreDNS crashing breaks DNS resolution for the entire cluster simultaneously; a single Service misconfiguration only affects that one Service's name","demo05-services,coredns,cka-troubleshooting"
+"What CoreDNS plugin handles non-cluster DNS queries like google.com?","forward — forwards them to the node's own /etc/resolv.conf","demo05-services,coredns,cka-services-networking"
+"What's the DNS format for resolving an individual pod directly, without a Service?","<pod-ip-with-dashes>.<namespace>.pod.<cluster-domain> — e.g. 10.244.1.23 becomes 10-244-1-23.backend-ns.pod.cluster.local","demo05-services,dns,pod-dns,cka-services-networking"

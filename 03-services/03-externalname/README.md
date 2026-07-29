@@ -723,7 +723,7 @@ kubectl run netshoot --image=nicolaka/netshoot --rm -it --restart=Never -- nsloo
 ```bash
 kubectl create service externalname my-external-db --external-name mydb.prod.rds.amazonaws.com --dry-run=client -o yaml
 ```
-See `01-core-concepts/04-kubectl-essentials` for the full canonical `--dry-run` explanation.
+See `appendix-kubectl/01-kubectl-fundamentals` for the full canonical `--dry-run` explanation.
 
 ### Imperative Quick-Create Commands
 

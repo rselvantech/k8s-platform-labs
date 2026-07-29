@@ -1,0 +1,13 @@
+#deck:k8s-platform-labs::03-services::03-externalname
+#separator:Comma
+#columns:Front,Back,Tags
+"What does an ExternalName Service actually do?","Returns a DNS CNAME record pointing to an external hostname — pure DNS redirection, no proxying, no ClusterIP, no kube-proxy involvement","demo03-services,externalname,cka-services-networking"
+"Does an ExternalName Service have any EndpointSlices?","No — it never creates endpoints of any kind, unlike both ClusterIP and selectorless Services","demo03-services,externalname,endpointslices,cka-services-networking"
+"Can externalName be set to an IP address?","No — it's treated as a DNS name made of digits, not an IP, and fails to resolve (NXDOMAIN)","demo03-services,externalname,cka-services-networking"
+"What happens if you add a selector field to an ExternalName Service?","Nothing — it's accepted by the API but has zero effect; ExternalName remains pure DNS redirection regardless","demo03-services,externalname,ckad-application-deployment"
+"What Host header does an external server see when accessed via ExternalName?","Your internal Service's own name, not the external server's real hostname — can cause rejections on Host-header-strict servers","demo03-services,externalname,http,cka-services-networking"
+"Can an ExternalName Service's externalName point at another Kubernetes Service's own DNS name?","Yes — CNAME chaining to a real resolvable hostname works, including another ClusterIP Service's internal DNS name","demo03-services,externalname,dns,cka-services-networking"
+"What's the main practical value of using ExternalName instead of hardcoding a hostname in application config?","If the external target changes, you update one Service object instead of every deployment's config — the app always talks to a stable internal name","demo03-services,externalname,ckad-application-deployment"
+"When would you use a selectorless Service instead of ExternalName?","When your external target is a stable IP address (not a hostname) and you need port mapping or load balancing across multiple IPs — covered in 02-service-internals","demo03-services,selectorless,cka-services-networking"
+"Does ExternalName perform any load balancing?","No — it returns a single CNAME; any load balancing happens at the external DNS level if that hostname has multiple A records","demo03-services,externalname,cka-services-networking"
+"Is kubectl create service externalname the same command family as kubectl expose?","No — kubectl expose has no ExternalName mode; ExternalName Services use the separate kubectl create service externalname subcommand","demo03-services,imperative,ckad-application-deployment"

@@ -14,7 +14,7 @@ kind: EndpointSlice
 metadata:
   name: external-db-svc-endpoints
   labels:
-    kubernetes.io/service-name: external-db-svc
+    kubernetes.io/service-name: external-db-svc   # links this slice to the Service above
 addressType: IPv4
 protocol: TCP
 ports:
@@ -24,4 +24,4 @@ endpoints:
   - addresses:
       - "10.240.0.50"    # IP of external database server
     conditions:
-      ready: true
+      ready: true         # must be explicit — nothing computes this for you

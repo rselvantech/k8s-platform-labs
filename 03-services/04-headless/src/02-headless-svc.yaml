@@ -1,0 +1,12 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: backend-headless
+spec:
+  type: ClusterIP
+  clusterIP: None        # the literal string "None" — not "" — is what makes this headless
+  selector:
+    app: backend
+  ports:
+    - port: 5678
+      targetPort: 5678

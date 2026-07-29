@@ -28,7 +28,7 @@ alongside CoreDNS's own internals and a systematic debugging approach.
 - CoreDNS architecture — ConfigMap, plugins, Corefile
 - Cross-namespace service communication
 - Service environment variables (the other discovery method)
-- DNS policies — ClusterFirst, Default, None
+- DNS policies — ClusterFirst, Default, None, and ClusterFirstWithHostNet
 - Debugging DNS resolution systematically
 
 ## Prerequisites
@@ -54,7 +54,8 @@ By the end of this lab, you will be able to:
 3. ✅ Inspect CoreDNS configuration (Corefile) via ConfigMap
 4. ✅ Resolve services across namespaces using full DNS names
 5. ✅ Use service environment variables for discovery, and explain why DNS is preferred
-6. ✅ Apply all three DNS policies to pods, including `None` with a manual `dnsConfig`
+6. ✅ Apply all four DNS policies to pods, including `None` with a manual `dnsConfig`
+7. ✅ Resolve an individual pod directly by DNS (not through a Service), and explain why this is rarely used directly but underpins headless-Service DNS
 7. ✅ Debug DNS resolution issues systematically
 
 ## Directory Structure
@@ -126,6 +127,8 @@ If not found, tries next:
   4. backend-svc (external DNS)
 ```
 
+---
+
 ### /etc/resolv.conf — The Key to DNS
 
 Every pod gets an `/etc/resolv.conf` injected by Kubernetes:
@@ -153,6 +156,8 @@ ndots:5     → if name has fewer than 5 dots, try search domains first
 > showed you without fully explaining — that demo's own "Test 4" walked
 > through this same file with a one-line summary and a promise to cover
 > it here in full.
+
+---
 
 ### CoreDNS Architecture
 
@@ -187,6 +192,8 @@ reload      → watches the coredns ConfigMap and reloads automatically
               the test directly
 ```
 
+---
+
 ### Service Environment Variables
 
 Kubernetes also injects environment variables into pods for every
@@ -209,6 +216,8 @@ that exist BEFORE the pod starts. Services created after the pod starts
 are NOT in the environment. This is why DNS is preferred over environment
 variables for service discovery.
 
+---
+
 ### DNS Policies
 
 ```
@@ -222,6 +231,17 @@ Default:
   → CoreDNS is NOT the nameserver
   → useful for pods that should use node DNS (infrastructure pods)
 
+ClusterFirstWithHostNet:
+  → for pods running with hostNetwork: true
+  → normally, hostNetwork pods would otherwise behave like Default
+    (since sharing the node's own network namespace changes what DNS
+    config they'd inherit) — this policy explicitly forces ClusterFirst
+    behavior anyway, so a hostNetwork pod can still resolve cluster
+    service names
+  → without this, a hostNetwork pod needing to reach a Service by name
+    would silently fail to resolve it, the same NXDOMAIN signature as
+    Default further down
+
 None:
   → no DNS config injected at all
   → must supply dnsConfig manually in pod spec — nameservers, searches,
@@ -234,13 +254,31 @@ None:
 
 ## Lab Step-by-Step Guide
 
+By the end of this walkthrough you'll have two Deployments in two
+separate namespaces, and use that separation specifically to probe DNS
+resolution — same-namespace short names, cross-namespace qualified
+names, full FQDNs, CoreDNS's own Corefile, service environment
+variables, and all four DNS policies. Steps 1–4 build the setup and
+explore standard resolution; Step 4b resolves a pod directly; Steps
+5–7 cover environment variables, DNS policies, and systematic debugging.
+
 ### Step 1: Setup — Deploy Services in Separate Namespaces
+
+This step's only role is creating two namespaces to resolve *across* —
+none of the objects themselves are new; every field here was already
+covered in `01-clusterip-nodeport` and `02-deployments`. The genuinely
+new content in this demo starts in Step 2.
 
 ```bash
 cd 03-services/05-service-discovery/src
 ```
 
-**01-backend-namespace.yaml:**
+#### Backend Namespace, Deployment, and Service
+
+Everything backend-related lives in its own namespace (`backend-ns`) —
+the separation Step 3's cross-namespace resolution test depends on.
+
+**`01-backend-namespace.yaml`:**
 ```yaml
 apiVersion: v1
 kind: Namespace
@@ -265,7 +303,7 @@ spec:
       terminationGracePeriodSeconds: 0
       containers:
         - name: backend
-          image: hashicorp/http-echo:0.2.3
+          image: hashicorp/http-echo:1.0.0
           args:
             - "-text=Hello from backend-ns"
           ports:
@@ -292,7 +330,12 @@ spec:
       targetPort: 5678
 ```
 
-**02-frontend-namespace.yaml:**
+#### Frontend Namespace and Deployment
+
+The counterpart namespace (`frontend-ns`) — this one deliberately has no
+Service yet, since Step 3's tests reach the backend *from* a pod here.
+
+**`02-frontend-namespace.yaml`:**
 ```yaml
 apiVersion: v1
 kind: Namespace
@@ -317,7 +360,7 @@ spec:
       terminationGracePeriodSeconds: 0
       containers:
         - name: frontend
-          image: nginx:1.27
+          image: nginx:1.30.4
           ports:
             - containerPort: 80
           resources:
@@ -350,6 +393,10 @@ backend-svc   ClusterIP   10.96.xxx.xxx   5678/TCP
 
 ### Step 2: Inspect /etc/resolv.conf
 
+This step is where the demo's actual new content begins — reading the
+DNS configuration every pod gets, in full, past the one-line summary
+`01-clusterip-nodeport` gave it.
+
 ```bash
 kubectl run netshoot --image=nicolaka/netshoot --rm -it --restart=Never -n frontend-ns -- bash
 ```
@@ -378,6 +425,11 @@ exit
 ---
 
 ### Step 3: Cross-Namespace DNS Resolution
+
+This step proves the search-domain mechanic from Step 2 directly — the
+same short name that works inside a pod's own namespace fails across a
+namespace boundary, and this shows exactly why, plus the two forms that
+do work.
 
 ```bash
 kubectl run netshoot --image=nicolaka/netshoot --rm -it --restart=Never -n frontend-ns -- bash
@@ -437,6 +489,10 @@ exit
 ---
 
 ### Step 4: Inspect CoreDNS Configuration
+
+Steps 2–3 showed DNS resolution *working* — this step looks at the
+actual server making those decisions: CoreDNS's own configuration,
+the ConfigMap-backed Corefile driving everything you've observed so far.
 
 ```bash
 kubectl describe configmap coredns -n kube-system
@@ -506,6 +562,53 @@ Two CoreDNS pods for redundancy. ✅
 
 ---
 
+### Step 4b: Resolve a Pod Directly by DNS — Not Just Services
+
+Everything so far has resolved **Service** names. The Corefile's
+`kubernetes` plugin block above also enables `pods insecure` — a
+separate, less-used capability: resolving an **individual pod** by DNS,
+identified by its IP, not by going through any Service at all.
+
+```bash
+# Get a backend pod's IP
+kubectl get pods -n backend-ns -o wide
+```
+**Expected output (note the IP, e.g. 10.244.1.23):**
+```
+NAME                              READY   STATUS    IP
+backend-deploy-xxxxxxxxx-aaaaa    1/1     Running   10.244.1.23
+```
+
+The pod-DNS format replaces every `.` in the IP with a `-`:
+
+```
+<pod-ip-with-dashes>.<namespace>.pod.<cluster-domain>
+
+10.244.1.23 → 10-244-1-23.backend-ns.pod.cluster.local
+```
+
+```bash
+kubectl run netshoot --image=nicolaka/netshoot --rm -it --restart=Never \
+  -- nslookup 10-244-1-23.backend-ns.pod.cluster.local
+```
+**Expected output:**
+```
+Name:   10-244-1-23.backend-ns.pod.cluster.local
+Address: 10.244.1.23
+```
+
+**Why this exists, and why you'll rarely reach for it directly:** pod IPs
+are ephemeral (`01-core-concepts`) — this DNS record only stays valid as
+long as that specific pod does, which makes it far less useful on its own
+than Service-based discovery. Where it actually matters is as
+**infrastructure**, not something applications typically call directly:
+this is the exact mechanism a headless Service's multi-A-record response
+(`04-headless`) is built from — CoreDNS resolving each backing pod's own
+record is what a headless Service's DNS answer actually assembles under
+the hood.
+
+---
+
 ### Step 5: Service Environment Variables
 
 Create a pod AFTER services exist and inspect the injected variables:
@@ -528,7 +631,7 @@ spec:
 EOF
 
 # Create a pod AFTER the service exists
-kubectl run env-test --image=busybox:1.36 --restart=Never -- sleep 3600
+kubectl run env-test --image=busybox:1.38.0 --restart=Never -- sleep 3600
 
 kubectl exec env-test -- env | grep -i demo
 ```
@@ -582,6 +685,10 @@ kubectl delete svc demo-svc new-svc
 ---
 
 ### Step 6: DNS Policies
+
+This step applies the `dnsPolicy` values from Concepts above to real
+pods — confirming `ClusterFirst` (the default) resolves cluster names
+and `Default` (confusingly named) doesn't.
 
 ```bash
 # Default policy (ClusterFirst) — CoreDNS is the nameserver
@@ -647,6 +754,13 @@ kubectl delete pod dns-node-policy --grace-period=0 --force
 > Error-1 for exactly what happens when that manual configuration is
 > wrong, since a *working* `None` example would just look identical to
 > `ClusterFirst` if you simply pointed `dnsConfig` back at CoreDNS.
+>
+> `ClusterFirstWithHostNet` also isn't demonstrated hands-on here — it
+> only matters for a pod with `hostNetwork: true`, which this chapter
+> hasn't introduced. Know it exists and what problem it solves (a
+> hostNetwork pod that still needs to resolve cluster Service names) —
+> full hands-on treatment fits better alongside `hostNetwork` itself in
+> a future demo.
 
 ---
 
@@ -686,7 +800,8 @@ NXDOMAIN for service name:
 
 NXDOMAIN for all names including kubernetes.default:
   → CoreDNS pods not running (kubectl get pods -n kube-system)
-  → Pod dnsPolicy is not ClusterFirst
+  → Pod dnsPolicy is not ClusterFirst (or ClusterFirstWithHostNet
+    for a hostNetwork pod)
 
 Timeout:
   → CoreDNS pods overloaded or crashing — see this demo's Break-Fix
@@ -702,6 +817,10 @@ exit
 ---
 
 ### Step 8: Final Cleanup
+
+Tear down both namespaces — deleting a namespace cascades to everything
+inside it (per `01-core-concepts`), so this alone removes every
+Deployment, Service, and Pod created in Steps 1–7.
 
 ```bash
 kubectl delete -f 01-backend-namespace.yaml
@@ -720,9 +839,10 @@ In this lab, you:
 - ✅ Read `/etc/resolv.conf` and explained search domains and `ndots:5` in full — resolving what `01-clusterip-nodeport` deferred
 - ✅ Successfully resolved services across namespaces using `svc.namespace` format
 - ✅ Inspected CoreDNS Corefile configuration and every key plugin
+- ✅ Resolved an individual pod directly by DNS (`pods insecure`), and connected that mechanism to `04-headless`'s multi-A-record behavior
 - ✅ Observed service environment variables and their pod-start-time-only limitation
 - ✅ Applied `dnsPolicy: Default` and observed it breaks cluster DNS resolution
-- ✅ Understood `dnsPolicy: None`'s manual-configuration requirement
+- ✅ Understood `dnsPolicy: None`'s manual-configuration requirement, and `ClusterFirstWithHostNet`'s narrower hostNetwork-specific purpose
 - ✅ Followed a systematic DNS debugging approach
 
 ---
@@ -733,7 +853,12 @@ In this lab, you:
 cd src/break-fix/
 ```
 
-### Error-1
+### Error-1 — "A pod can't resolve anything, cluster or external"
+
+**The scenario:** a pod was deliberately given a fully custom DNS
+configuration (`dnsPolicy: None`) for a specialized use case, but now
+*nothing* resolves from inside it — not cluster Service names, not
+external hostnames either. Investigate what's actually configured.
 
 **`src/break-fix/01-dnspolicy-none-broken.yaml`:**
 ```yaml
@@ -793,7 +918,16 @@ kubectl delete pod dns-none-broken --grace-period=0 --force 2>/dev/null || true
 
 ---
 
-### Error-2
+### Error-2 — "Every pod in the cluster suddenly lost DNS at once"
+
+**The scenario:** something changed recently, and now *every* pod
+cluster-wide — not just one namespace or one Service — is failing every
+DNS lookup, cluster and external names alike. This is a fundamentally
+different scale of symptom from anything else in this chapter — track
+down what's actually different.
+
+This scenario is self-contained — it acts directly on the cluster-wide
+`coredns` ConfigMap, no main-lab resources required.
 
 ```bash
 kubectl edit configmap coredns -n kube-system
@@ -852,8 +986,14 @@ A: It's specifically for infrastructure pods that need the *node's* DNS resoluti
 **Q: What's the practical risk of `dnsPolicy: None`?**
 A: You own every part of DNS resolution yourself — `nameservers`, `search`, `ndots`, all of it. Get any of it wrong (this demo's Break-Fix Error-1) and nothing is auto-corrected or falls back to a sane default the way `ClusterFirst` would.
 
+**Q: A pod runs with `hostNetwork: true` and needs to resolve cluster Service names. What DNS policy does it need?**
+A: `ClusterFirstWithHostNet` — sharing the node's network namespace changes what DNS config a pod would otherwise inherit, so this policy exists specifically to force `ClusterFirst`-style resolution back on for that case. Without it, the pod would fail to resolve cluster Service names, the same NXDOMAIN pattern `Default` produces.
+
 **Q: A single Service returns NXDOMAIN, but `nslookup kubernetes.default` works fine. What does that narrow down?**
 A: CoreDNS itself is healthy and reachable — the problem is specific to that one Service: wrong namespace in the query, the Service doesn't exist, or it exists but has no matching Ready pods. This is different from every name failing, which points at CoreDNS itself or the pod's `dnsPolicy`.
+
+**Q: Can you resolve an individual pod by DNS without going through a Service at all?**
+A: Yes — the `pods insecure` CoreDNS option enables `<pod-ip-with-dashes>.<namespace>.pod.<cluster-domain>`. It's rarely used directly by applications, since pod IPs (and therefore these records) are ephemeral, but it's the actual mechanism a headless Service's multi-A-record DNS response is built from.
 
 ---
 
@@ -872,9 +1012,11 @@ A: CoreDNS itself is healthy and reachable — the problem is specific to that o
 |---|---|
 | Forgetting cross-namespace requires at least `svc.namespace` | Short names only resolve within the pod's own namespace — a very common exam-task gotcha |
 | Confusing `dnsPolicy: Default` with "the default policy" | Confusingly named — `ClusterFirst` is actually the default; `Default` means "use the node's DNS," a completely different thing |
+| Forgetting `ClusterFirstWithHostNet` exists | A `hostNetwork: true` pod using plain `ClusterFirst` may not resolve cluster names the way you'd expect — this is the policy built for that case |
 | Assuming service env vars are always current | They're a snapshot at pod-start time only — stale the moment a relevant Service changes afterward |
 | Not distinguishing single-name NXDOMAIN from total DNS failure | Different root causes entirely — one Service issue vs. CoreDNS itself being down |
-| Assuming `dnsPolicy: None` needs no configuration | It needs the *most* configuration of the three policies — nothing is injected automatically |
+| Assuming `dnsPolicy: None` needs no configuration | It needs the *most* configuration of the four policies — nothing is injected automatically |
+| Forgetting the pod-DNS format uses dashes, not dots | `10.244.1.23` becomes `10-244-1-23`, not left as-is — a syntax detail easy to get backwards |
 
 ### Exam Task — Write it from scratch
 
@@ -913,8 +1055,10 @@ explicitly.
 | The `reload` plugin doesn't validate before reloading | A syntax error in the Corefile ConfigMap crashes CoreDNS cluster-wide, not gracefully rejected |
 | Service env vars are a stale snapshot, DNS is always current | Env vars only exist for Services that existed before the pod started; DNS has no such limitation |
 | `dnsPolicy: Default` is confusingly named | It means "use the node's DNS," not "the default policy" — `ClusterFirst` is actually the default |
+| `dnsPolicy: ClusterFirstWithHostNet` exists for `hostNetwork: true` pods | Forces `ClusterFirst`-style cluster-name resolution back on for a case that would otherwise silently lose it |
 | `dnsPolicy: None` means total manual ownership of DNS config | Nothing injected automatically — get `dnsConfig` wrong and nothing falls back gracefully |
 | A single-name NXDOMAIN and total DNS failure have different causes | One points at a specific Service/namespace mistake; the other points at CoreDNS itself being down |
+| Individual pods can be resolved by DNS directly, not just Services | `<pod-ip-with-dashes>.<namespace>.pod.<cluster-domain>`, enabled by `pods insecure` — rarely used directly, but the actual mechanism behind headless-Service multi-A-record answers |
 
 ---
 
@@ -977,9 +1121,11 @@ minikube ssh -p 3node "cat /etc/resolv.conf"
 "Are Service environment variables always current?","No — only injected for Services that existed before the pod started; DNS is always current by comparison","demo05-services,service-env-vars,cka-services-networking"
 "Is dnsPolicy: Default actually the default policy?","No, confusingly — ClusterFirst is the actual default; Default means the pod uses the NODE's DNS instead of CoreDNS","demo05-services,dns-policy,cka-services-networking"
 "What does dnsPolicy: None require that the other policies don't?","A fully manual dnsConfig — nameservers, search domains, and options are all your own responsibility, nothing is injected automatically","demo05-services,dns-policy,cka-services-networking"
+"What problem does dnsPolicy: ClusterFirstWithHostNet solve?","A pod running with hostNetwork: true would otherwise lose cluster-name resolution — this policy forces ClusterFirst-style behavior back on for that case","demo05-services,dns-policy,hostnetwork,cka-services-networking"
 "A single Service name returns NXDOMAIN, but nslookup kubernetes.default works. What does that narrow down?","CoreDNS itself is healthy — the problem is specific to that Service: wrong namespace, doesn't exist, or no Ready pods","demo05-services,troubleshooting,cka-troubleshooting"
 "What's the blast radius when CoreDNS itself crashes vs. when a single Service is misconfigured?","CoreDNS crashing breaks DNS resolution for the entire cluster simultaneously; a single Service misconfiguration only affects that one Service's name","demo05-services,coredns,cka-troubleshooting"
 "What CoreDNS plugin handles non-cluster DNS queries like google.com?","forward — forwards them to the node's own /etc/resolv.conf","demo05-services,coredns,cka-services-networking"
+"What's the DNS format for resolving an individual pod directly, without a Service?","<pod-ip-with-dashes>.<namespace>.pod.<cluster-domain> — e.g. 10.244.1.23 becomes 10-244-1-23.backend-ns.pod.cluster.local","demo05-services,dns,pod-dns,cka-services-networking"
 ````
 
 ---
@@ -1079,7 +1225,24 @@ Trap: A is the natural but incorrect reading of the name itself.
 
 ---
 
-**Q6. What does `dnsPolicy: None` require that `ClusterFirst` doesn't?**
+**Q6. A pod runs with `hostNetwork: true` and needs to resolve cluster Service names by their normal DNS names. What `dnsPolicy` handles this?**
+
+- A) `Default` — hostNetwork pods should use node DNS
+- B) `ClusterFirstWithHostNet`
+- C) `None`, with a manually configured nameserver
+- D) hostNetwork pods can never resolve cluster Service names
+
+<details>
+<summary>Answer</summary>
+
+**B** — This policy exists specifically because a plain `ClusterFirst` doesn't behave the same way once a pod shares the node's network namespace — `ClusterFirstWithHostNet` forces the cluster-resolution behavior back on.
+Trap: A sounds plausible but is backwards — `Default` would prevent exactly the cluster-name resolution the pod needs.
+
+</details>
+
+---
+
+**Q7. What does `dnsPolicy: None` require that `ClusterFirst` doesn't?**
 
 - A) Nothing extra — it behaves identically
 - B) A fully manual `dnsConfig` — nameservers, search domains, and options are entirely your responsibility
@@ -1096,7 +1259,7 @@ Trap: A assumes equivalence with the default behavior, which is the opposite of 
 
 ---
 
-**Q7. A single Service's name returns NXDOMAIN, but `nslookup kubernetes.default` succeeds. What does this narrow down?**
+**Q8. A single Service's name returns NXDOMAIN, but `nslookup kubernetes.default` succeeds. What does this narrow down?**
 
 - A) CoreDNS itself must be down
 - B) CoreDNS is healthy — the issue is specific to that one Service (wrong namespace, doesn't exist, or no Ready pods)
@@ -1113,26 +1276,26 @@ Trap: A and C both assume broader breakage than the evidence actually supports �
 
 ---
 
-**Q8. What's the practical difference in blast radius between a CoreDNS crash and a single misconfigured Service?**
+**Q9. What's the correct DNS format for resolving pod `10.244.1.23` in namespace `backend-ns` directly, without going through a Service?**
 
-- A) They're equivalent — both affect the whole cluster
-- B) A CoreDNS crash breaks DNS for the entire cluster at once; a misconfigured Service only affects its own name
-- C) A misconfigured Service is always worse because it's harder to detect
-- D) There's no meaningful difference in practice
+- A) `10.244.1.23.backend-ns.pod.cluster.local`
+- B) `10-244-1-23.backend-ns.pod.cluster.local`
+- C) `backend-ns.10-244-1-23.pod.cluster.local`
+- D) Pods cannot be resolved by DNS directly, only Services can
 
 <details>
 <summary>Answer</summary>
 
-**B** — This is exactly why "Timeout" (all names failing) and "NXDOMAIN for one name" are treated as distinct diagnostic categories in this demo's systematic debugging approach.
-Trap: A collapses two very different failure scopes into one, losing the diagnostic value of distinguishing them.
+**B** — Every dot in the IP becomes a dash; the namespace and `pod.<cluster-domain>` suffix come after, in that order.
+Trap: A keeps the dots from the original IP, which isn't valid — CoreDNS's `pods insecure` option specifically expects the dashed form.
 
 </details>
 
 Score guide:
 | Score | Action |
 |---|---|
-| 8/8 | Import Anki cards, move to next chapter |
-| 7/8 | Review the wrong answer, then proceed |
-| 6/8 | Re-read the relevant section, retry those questions |
-| Below 6/8 | Re-read the full demo and redo the walkthrough before proceeding |
+| 9/9 | Import Anki cards, move to next chapter |
+| 8/9 | Review the wrong answer, then proceed |
+| 6-7/9 | Re-read the relevant section, retry those questions |
+| Below 6/9 | Re-read the full demo and redo the walkthrough before proceeding |
 ````

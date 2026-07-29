@@ -1,0 +1,23 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: broken-mysql
+spec:
+  serviceName: nonexistent-headless-svc   # points at a Service that doesn't exist
+  replicas: 2
+  selector:
+    matchLabels:
+      app: broken-mysql
+  template:
+    metadata:
+      labels:
+        app: broken-mysql
+    spec:
+      terminationGracePeriodSeconds: 0
+      containers:
+        - name: mysql
+          image: hashicorp/http-echo:1.0.0
+          args:
+            - "-text=hello"
+          ports:
+            - containerPort: 3306

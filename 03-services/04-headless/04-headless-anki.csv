@@ -1,0 +1,14 @@
+#deck:k8s-platform-labs::03-services::04-headless
+#separator:Comma
+#columns:Front,Back,Tags
+"What's the difference between clusterIP: None and clusterIP: \"\"?","None explicitly creates a headless Service; empty string means auto-assign a normal ClusterIP — identical to omitting the field entirely","demo04-services,headless,cka-services-networking"
+"Does a headless Service use kube-proxy at all?","No — no virtual IP, no proxy rules; DNS returns pod IPs directly and the caller connects to them itself","demo04-services,headless,cka-services-networking"
+"Does StatefulSet give pods a stable IP address?","No — pod IPs remain ephemeral regardless; StatefulSet gives a stable NAME, and the headless Service's DNS record is what stays current as the IP changes","demo04-services,statefulset,cka-workloads-scheduling"
+"What field links a StatefulSet to its headless Service?","spec.serviceName on the StatefulSet, matching the headless Service's metadata.name","demo04-services,statefulset,cka-workloads-scheduling"
+"Is spec.serviceName validated against a real, existing Service at apply time?","No — a typo or nonexistent target still lets the StatefulSet and its pods create successfully; only per-pod DNS resolution silently fails","demo04-services,statefulset,troubleshooting,cka-troubleshooting"
+"What is the per-pod DNS format for a StatefulSet pod behind a headless Service?","<pod-name>.<service-name>.<namespace>.svc.cluster.local","demo04-services,statefulset,dns,cka-services-networking"
+"Does kubectl create statefulset exist?","No — unlike Deployments, Services, and Jobs, StatefulSets have no imperative creation subcommand at all; YAML only","demo04-services,statefulset,imperative,ckad-application-deployment"
+"Can a headless Service be used with a regular Deployment instead of a StatefulSet?","Yes — DNS returns all pod IPs either way, but Deployment pod names are random, so per-pod DNS addressing isn't meaningful without a StatefulSet's stable names","demo04-services,headless,deployment,cka-services-networking"
+"Why does StatefulSet need a headless Service instead of a regular ClusterIP one?","A regular ClusterIP load-balances across all pods behind one virtual IP — the opposite of what's needed when the goal is addressing one specific named pod directly","demo04-services,statefulset,headless,cka-services-networking"
+"Are StatefulSet pods created all at once or in order?","In order — mysql-0 before mysql-1 before mysql-2 — unlike a Deployment's ReplicaSet, which creates all replicas without a guaranteed sequence","demo04-services,statefulset,cka-workloads-scheduling"
+"What does publishNotReadyAddresses: true do on a headless Service?","Publishes a pod's DNS record immediately, without waiting for readiness — solves peer-discovery-during-startup for clustered apps that need to find each other before any individual pod is ready","demo04-services,headless,statefulset,cka-services-networking"
