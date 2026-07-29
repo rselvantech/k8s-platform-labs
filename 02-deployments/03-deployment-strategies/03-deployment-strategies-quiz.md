@@ -3,175 +3,176 @@
 > One correct answer per question unless stated otherwise.
 > Target: 80% or above before moving to next Demo.
 
-**Q1. What makes Blue-Green's traffic switch instant?**
+**Q1. Neither `RollingUpdate` nor `Recreate` can express "send exactly 10% of traffic to a new version." Why not, structurally?**
 
-- A) Both Deployments are updated simultaneously
-- B) The Service's selector changes, and its Endpoints list is recomputed immediately — no Deployment changes at all
-- C) kubectl restarts all pods
-- D) DNS propagation completes instantly in Kubernetes
+- A) Kubernetes simply hasn't implemented that feature yet for `spec.strategy`
+- B) Both operate entirely within a single Deployment's own reconciliation loop — there's no partial-traffic concept anywhere below the whole-Deployment level
+- C) Only Services support percentages, and Deployments never touch Services
+- D) `maxSurge` already is a traffic percentage, it's just named confusingly
 
 <details>
 <summary>Answer</summary>
 
-**B** — Neither Deployment is touched; only the Service's selector changes, and Endpoints recompute against whichever Pods currently match.
-Trap: A assumes both Deployments need coordinated changes, which defeats the entire point of the pattern.
+**B** — Both native strategies replace Pods within one Deployment; neither one has any concept of routing a portion of *requests* anywhere. That's exactly the ceiling Blue-Green and Canary solve by moving control to a Service's selector instead.
+Trap: D confuses a *Pod-count* knob (`maxSurge`) with a *traffic-routing* knob — they aren't the same kind of percentage at all.
 
 </details>
 
 ---
 
-**Q2. Is Canary traffic split ever an exact percentage with native Kubernetes Services?**
+**Q2. `kubectl port-forward deployment/nginx-green 8080:5678` is used to test Green before switching traffic. Does this go through the Service at all?**
 
-- A) Yes, always exact
-- B) No — it's approximate, based on pod-count ratio and round-robin balancing
-- C) Only if replicas are a multiple of 10
-- D) Only with a LoadBalancer type Service
+- A) Yes — it forwards through the Service, so it's a true production-traffic test
+- B) No — it connects directly to a Green Pod, completely bypassing the Service and its selector
+- C) Only if the Service selector already includes `version: green`
+- D) It depends on the Service's `type`
 
 <details>
 <summary>Answer</summary>
 
-**B** — 4 stable + 1 canary is "roughly" 20%, not a guaranteed percentage — exact control requires something beyond native Services.
-Trap: C invents a mathematical condition that doesn't actually change how load balancing works.
+**B** — Port-forward talks straight to a Pod. That's exactly why it's safe to run before Step 7's switch — it can't accidentally expose real users to an unverified version, since it never touches the Service's Endpoints at all.
+Trap: C imagines port-forward's behavior depends on the Service's current selector — it doesn't, since it never consults the Service in the first place.
 
 </details>
 
 ---
 
-**Q3. A canary pod is stuck in `ImagePullBackOff`. Does it receive any real user traffic?**
+**Q3. Neither Blue-Green YAML in this demo sets `spec.strategy` at all, yet `kubectl describe deployment nginx-blue` shows `RollingUpdateStrategy: 25% max unavailable, 25% max surge`. Why?**
 
-- A) Yes, a small amount, since it matches the selector
-- B) No — only Ready pods become Service Endpoints
-- C) Yes, but only error responses
-- D) It depends on the Service type
+- A) Blue-Green deployments always hardcode 25%/25%, regardless of the YAML
+- B) These are RollingUpdate's ordinary API-server defaults, applying here for the same reason they'd apply to any Deployment that doesn't set `spec.strategy`
+- C) minikube sets this value at cluster install time
+- D) The Service overrides the Deployment's strategy once it selects `version: blue`
 
 <details>
 <summary>Answer</summary>
 
-**B** — Matching a selector isn't sufficient; a pod must also be `Ready` to become an Endpoint, so a broken canary is invisible to real traffic entirely.
-Trap: A assumes label matching alone determines traffic eligibility, ignoring the Ready requirement.
+**B** — Same defaulting behavior covered for any ordinary Deployment — nothing about running inside a Blue-Green *pattern* changes it. It only becomes relevant if you ever update `nginx-blue`/`nginx-green` directly (not the Blue-Green switch itself), since that would briefly allow a Pod or two unavailable.
+Trap: D invents a Service-to-Deployment override mechanism that doesn't exist — a Service's selector has no influence over how a Deployment reconciles its own Pods.
 
 </details>
 
 ---
 
-**Q4. Does `kubectl label deployment nginx-canary track=stable --overwrite` change what its Pods are labeled?**
+**Q4. After switching traffic from Blue to Green, the Service object's own `AGE` in `kubectl get svc` is unchanged from before the switch. What does that confirm?**
 
-- A) Yes, immediately
-- B) No — it only changes the Deployment object's own labels, not `spec.template.metadata.labels`
-- C) Yes, but only after the next rollout
-- D) It deletes and recreates the Pods with new labels
+- A) The switch didn't actually take effect yet
+- B) Switching traffic never recreates the Service — it only recomputes which Pods currently qualify as Endpoints
+- C) `AGE` only updates when `spec.type` changes
+- D) The Service was cached and needs a manual refresh
 
 <details>
 <summary>Answer</summary>
 
-**B** — The Deployment's own `metadata.labels` and its Pods' labels (via `spec.template.metadata.labels`) are two separate, independently-set fields — relabeling one never touches the other.
-Trap: C imagines a delayed effect that doesn't exist — there's no mechanism that would eventually propagate this relabel to Pods.
+**B** — Compare the Endpoints IP list before and after the switch: every IP changes, but the Service object itself — including its `AGE` — never does. That's direct evidence the mechanism is "recompute Endpoints," not "delete and recreate the Service."
+Trap: A assumes an unchanged `AGE` means nothing happened, when the actual change (the Endpoints list) is a different field entirely.
 
 </details>
 
 ---
 
-**Q5. What happens if a Service selector has a typo'd key, like `versoin` instead of `version`?**
+**Q5. `kubectl expose deployment nginx-blue --port=80 --target-port=5678` derives its selector automatically from the Deployment it targets. Why doesn't this work well for Blue-Green or Canary's own Service?**
 
-- A) Kubernetes rejects the YAML as invalid
-- B) It's accepted as valid YAML but matches zero pods, with no error message
-- C) Kubernetes auto-corrects the typo
-- D) It falls back to matching all pods
+- A) `kubectl expose` doesn't support `NodePort` type
+- B) It would copy the full Deployment selector (including `version`/`track`), when Blue-Green needs a selector matching only one version and Canary needs one deliberately omitting the differentiating label
+- C) `kubectl expose` can only target Services, not Deployments
+- D) It requires the Deployment to already have a Service attached
 
 <details>
 <summary>Answer</summary>
 
-**B** — Any key name is syntactically legal in a selector map, so this is silently accepted — the failure is a Service matching nothing, not a rejected apply.
-Trap: D imagines a permissive fallback that doesn't exist — an empty match stays empty, it doesn't broaden.
+**B** — Both patterns need a Service selector shaped differently from either Deployment's own selector — Blue-Green needs to target exactly one `version` value at a time, Canary needs to omit `track` entirely so it matches both Deployments at once. `kubectl expose`'s auto-derived selector can't express either shape reliably, which is why this demo hand-writes the Service YAML instead.
+Trap: A is a real `kubectl expose` limitation in general, but it isn't the reason this pattern specifically avoids it.
 
 </details>
 
 ---
 
-**Q6. What is the real resource cost of Blue-Green deployment?**
+**Q6. What does `hashicorp/http-echo` actually do that a plain `nginx` image doesn't, and why does that matter for this specific demo?**
 
-- A) None — it's completely free
-- B) Roughly 2x compute, since both environments run simultaneously during the overlap
-- C) Only the cost of the Service object itself
-- D) Cost scales with the number of rollbacks performed
+- A) It's faster to pull, which is the only reason it's used
+- B) It responds to every request with a fixed text string you set yourself, which is what lets `curl` prove which version actually answered — a plain `nginx` page looks identical regardless of version
+- C) It automatically load-balances between Blue and Green
+- D) It requires no `ports` field, simplifying the YAML
 
 <details>
 <summary>Answer</summary>
 
-**B** — "Zero downtime" doesn't mean zero cost — running two full production-sized environments at once is genuinely 2x the compute footprint for that window.
-Trap: A treats "no downtime" and "no cost" as the same thing, which they aren't.
+**B** — The whole point of switching this demo's images was to make Step 4/8's `curl` output *itself* the evidence of which version is live, instead of an unfalsifiable generic welcome page.
+Trap: C invents a routing capability that has nothing to do with what `http-echo` actually is — it's a trivial echo server, not a proxy.
 
 </details>
 
 ---
 
-**Q7. What does native Kubernetes Service-based Canary lack compared to a tool like Argo Rollouts?**
+**Q7. A Service is described as "not a running process." What is it actually, mechanically?**
 
-- A) The ability to route traffic to more than one version at all
-- B) Precise traffic percentages, automated analysis, and automatic rollback
-- C) Support for more than 2 replicas
-- D) The ability to use labels
+- A) A background pod that proxies all traffic
+- B) A stable network identity (ClusterIP/DNS name) plus a continuously-recomputed list of matching, Ready Pod IPs (Endpoints)
+- C) A DNS entry only, with no IP of its own
+- D) A special kind of ReplicaSet
 
 <details>
 <summary>Answer</summary>
 
-**B** — Native Services can route to multiple versions, but everything about *when* and *how much* traffic shifts, and whether to roll back, is manual with plain Kubernetes objects.
-Trap: A overstates the limitation — basic multi-version routing is exactly what this demo already achieved natively.
+**B** — There's no process to restart or crash — a Service is bookkeeping plus a live selector query, which is exactly why editing its selector has no Pod-level side effects of its own.
+Trap: D confuses a Service with a workload controller — a Service manages nothing about Pod lifecycle, only which existing Pods currently qualify as Endpoints.
 
 </details>
 
 ---
 
-**Q8. In a Service's `ports` block, what happens if `targetPort` doesn't match the port the container actually listens on?**
+**Q8. Once confident in Canary at 100%, the demo deletes `nginx-stable` and mentions relabeling `nginx-canary`'s own `metadata.labels`. Besides that relabel not touching Pods, what's the actual honest way to get a Deployment genuinely named/labeled `nginx-stable` going forward?**
 
-- A) Kubernetes rejects the Service as invalid
-- B) Requests silently fail — no apply-time error, since it's only a runtime mismatch
-- C) Kubernetes automatically detects and corrects the correct port
-- D) The Service falls back to using `port` as the target too
+- A) Wait for the next scheduled rollout, which will rename it automatically
+- B) Either keep running under the current name (`nginx-canary`) as the new baseline and update your own tooling/docs accordingly, or delete-and-recreate a proper `nginx-stable` Deployment with the new image
+- C) `kubectl rename deployment nginx-canary nginx-stable`
+- D) Patch `spec.selector` directly to say `track: stable`
 
 <details>
 <summary>Answer</summary>
 
-**B** — There's nothing invalid about the YAML itself — a `targetPort` is just a number Kubernetes doesn't verify against what's actually listening inside the container, so a mismatch only shows up as a runtime failure (a hang or connection-refuse), not a rejected `apply`.
-Trap: C imagines automatic detection that doesn't exist — Kubernetes has no visibility into what a container is actually listening on unless a probe explicitly checks it.
+**B** — There's no shortcut here — a Deployment's name and its `spec.selector`/`spec.template.metadata.labels` are all effectively fixed once created (name entirely, selector by the immutability rule from `01-basic-deployment`), so genuine renaming means either living with the current name or a real delete-and-recreate.
+Trap: C invents a command that doesn't exist — `kubectl` has no rename operation for any object; identity is fixed at creation.
 
 </details>
 
 ---
 
-**Q9. Why does Canary's Service selector deliberately omit the `track` label, when Blue-Green's selector includes `version`?**
+**Q9. Both Blue-Green and Canary in this demo were built with full hand-written YAML rather than imperative commands. What specifically makes the imperative route (`kubectl create deployment` + `kubectl expose`) awkward here, beyond just being "more typing"?**
 
-- A) It's a mistake in the YAML that happens to work anyway
-- B) Omitting `track` makes the selector match both stable and canary Pods at once, which is the entire mechanism that enables traffic splitting
-- C) `track` isn't a valid label key
-- D) The Service type determines whether `track` is needed
+- A) Imperative commands can't set `replicas`
+- B) `-text`/`args`, container port, and a precisely-shaped Service selector (partial match for Canary, single-version match for Blue-Green) all need to align exactly, and imperative flags don't cleanly express all of them together
+- C) Imperative commands don't support the `apps/v1` API group
+- D) `kubectl create deployment` doesn't support `NodePort` Services at all
 
 <details>
 <summary>Answer</summary>
 
-**B** — Blue-Green needs the selector to match exactly one version at a time, so it includes the differentiating label; Canary needs the selector to match both at once, so it deliberately leaves that label out. Same mechanism, opposite selector shape, on purpose.
-Trap: A dismisses a deliberate design choice as an accident — the omission is exactly what makes Canary's traffic-splitting possible.
+**B** — It's not that any single imperative command is broken — it's that several fields (container args, ports, and a deliberately-shaped selector) all have to agree precisely, which is fiddlier to guarantee with flags than with one reviewable YAML file.
+Trap: A and D both invent hard limitations that don't actually exist — the real friction is precision across several fields at once, not a missing feature.
 
 </details>
 
 ---
 
-**Q10. Why does editing a Service's selector work instantly with no error, when the same kind of edit on a Deployment's selector is rejected outright?**
+**Q10. Blue-Green requires running two full-sized environments simultaneously. Structurally, why can't Canary's approach (adjusting replica counts on two Deployments sharing one broad Service selector) work for an instant, all-at-once switch the way Blue-Green does?**
 
-- A) Services don't validate YAML the way Deployments do
-- B) A Service's selector has no ownership relationship to protect, unlike a Deployment's, which is tied to its ReplicaSet chain
-- C) It can't — both are equally immutable
-- D) Only NodePort-type Services allow selector edits
+- A) It could — Canary and Blue-Green are functionally identical patterns
+- B) Canary's Service selector matches both Deployments at once by design, so traffic share is only ever adjustable gradually via relative pod counts — there's no single selector edit that flips 100% of traffic from one to the other instantly
+- C) Canary Deployments are hardcoded to a maximum of 4 replicas
+- D) Blue-Green doesn't actually support instant switching either
 
 <details>
 <summary>Answer</summary>
 
-**B** — Deployment selector immutability exists specifically to protect the Deployment→ReplicaSet→Pod ownership chain; a Service has no such structure to protect, so Kubernetes places no such restriction on it.
-Trap: C assumes symmetry between two mechanisms that are actually deliberately different — this demo's entire Blue-Green pattern depends on that difference existing.
+**B** — Blue-Green's instant switch works because its selector matches *exactly one* version at a time — flipping one label value moves 100% of traffic at once. Canary's selector deliberately matches *both* versions simultaneously, so its only lever is the relative pod-count ratio, which is inherently gradual, not an instant single-edit switch.
+Trap: A collapses two patterns that this entire demo treats as structurally distinct — same underlying Endpoints mechanism, opposite selector shape, and therefore opposite switch behavior.
 
 </details>
 
 Score guide:
+
 | Score | Action |
 |---|---|
 | 9-10/10 | Import Anki cards, move to next Demo |
