@@ -2,70 +2,77 @@
 
 ## Concepts
 
-This lab covers advanced volume mount patterns for ConfigMaps and Secrets. The fundamentals (basic volume mounts) were covered in `01-configmaps` and `02-secrets`. This lab focuses on patterns that matter in production and in exams:
+This lab covers advanced volume mount patterns for ConfigMaps and Secrets. Fundamentals (basic volume mounts) were covered in `01-configmaps` and `02-secrets`. This lab focuses on:
 
 - `subPath` — mount a single file without replacing the entire directory
-- `defaultMode` and per-file `mode` — controlling file permissions
-- `projected` volumes — combining multiple sources (ConfigMap, Secret, Downward API, ServiceAccount token) into a single mount point
-- `readOnly` volume mount enforcement
-- Init container pattern — copying ConfigMap files to a writable location for apps that must modify config on startup
+- `defaultMode` and per-file `mode` — file permission control
+- `projected` volumes — combining multiple sources into one mount point
+- ServiceAccount token projection — bound, expiring OIDC tokens
+- Init container pattern — copying ConfigMap files to a writable location
 
 ### Why subPath matters
 
-Without `subPath`, mounting a ConfigMap volume at `/etc/nginx/nginx.conf` **replaces the entire `/etc/nginx/` directory** with the ConfigMap contents. All other files in that directory (mime.types, fastcgi_params, etc.) are hidden. `subPath` mounts a single key as a single file, leaving the rest of the directory intact.
+Without `subPath`, mounting a ConfigMap volume at a directory path **replaces the entire directory** with the ConfigMap contents. All pre-existing files are hidden.
 
 ```
-Without subPath:                     With subPath:
-mountPath: /etc/nginx                mountPath: /etc/nginx/nginx.conf
-→ /etc/nginx/ is REPLACED            subPath: nginx.conf
-  only nginx.conf exists             → /etc/nginx/ unchanged
-  mime.types gone                      /etc/nginx/nginx.conf added
-  fastcgi_params gone                  mime.types still there
+Without subPath:                      With subPath:
+mountPath: /etc/nginx                 mountPath: /etc/nginx/nginx.conf
+→ /etc/nginx/ contents REPLACED       subPath: nginx.conf
+  only ConfigMap keys exist           → /etc/nginx/ contents preserved
+  mime.types gone                       /etc/nginx/nginx.conf added/replaced
+  fastcgi_params gone                   mime.types still present
+  conf.d/ gone                          fastcgi_params still present
 ```
 
-> **subPath caveat:** Files mounted with `subPath` do **NOT** receive live updates when the ConfigMap changes. The symlink trick kubelet uses for atomic updates only works with full directory mounts. For live-updating single files, use a full directory mount with `items` to control which keys are projected.
+**subPath produces a direct bind-mount — not a symlink.** This is the critical difference from a full directory mount:
+
+| Mount type | How file appears | Live updates on CM change |
+|-----------|-----------------|--------------------------|
+| Full directory | Symlink → `..data/key` | ✅ Yes — atomic symlink swap |
+| `subPath` | Regular file (bind-mount) | ❌ No — bypass `..data/` chain entirely |
+
+> **Exam trap:** When asked to mount a ConfigMap key into a path where other files exist (e.g. `/etc/nginx/nginx.conf`), always use `subPath`. Mounting to the directory hides everything else.
 
 ### projected volumes
 
-A `projected` volume combines up to four source types into **one** `mountPath`:
+A `projected` volume combines up to four source types into **one** `mountPath` — one volume spec, one volumeMount.
 
-| Source type | Field name | What it provides |
-|-------------|-----------|-----------------|
+| Source type | Field | What it provides |
+|-------------|-------|-----------------|
 | ConfigMap | `configMap` | Config files |
 | Secret | `secret` | Credential files |
 | Downward API | `downwardAPI` | Pod identity files |
-| ServiceAccount token | `serviceAccountToken` | Bound, expiring OIDC tokens |
-
-Without `projected`, each source requires its own volume and its own `volumeMount`. With `projected`, all sources land in the same directory under controllable paths.
+| ServiceAccount token | `serviceAccountToken` | Bound, expiring OIDC JWT |
 
 ### ServiceAccount token projection
 
-The `serviceAccountToken` source injects a **bound** ServiceAccount token — cryptographically tied to the pod's UID and expiring after a configurable TTL. This is the modern replacement for the auto-mounted legacy token at `/var/run/secrets/kubernetes.io/serviceaccount/token`. The kubelet automatically rotates it before expiry.
+The projected `serviceAccountToken` source is the modern replacement for the auto-mounted legacy token at `/var/run/secrets/kubernetes.io/serviceaccount/token`. It produces a bound JWT that is:
+- Cryptographically tied to the pod's UID — invalidated when the pod is deleted
+- Expiring — minimum TTL 600s; kubelet rotates automatically at 80% of TTL
+- Audience-scoped — only valid for the specified audience, not reusable against other APIs
 
 ### File permission model
 
-Permissions on ConfigMap and Secret volume files are controlled at two levels:
-
-| Field | Scope | Default | Recommended |
-|-------|-------|---------|-------------|
-| `defaultMode` | All files in the volume | `0644` | `0444` for ConfigMaps, `0400` for Secrets |
+| Field | Scope | Default | Production recommendation |
+|-------|-------|---------|--------------------------|
+| `defaultMode` | All files in the volume | `0644` | `0444` for ConfigMaps; `0400` for Secrets |
 | `items[].mode` | Single file override | Inherits `defaultMode` | `0400` for private keys |
 
-> `readOnly: true` on a `volumeMount` is enforced by the kernel at the mount level. It is independent of file mode — even if `defaultMode` is `0644`, `readOnly: true` prevents any write. Always set both for secrets.
+`readOnly: true` on a volumeMount is enforced by the kernel at the mount level — independent of file mode. Always set `readOnly: true` AND `defaultMode: 0400` for Secrets.
 
 ### Init container writable copy pattern
 
-ConfigMap and Secret volumes are read-only. Some applications require a writable config directory at startup (for templating, self-modification, or generating derived files). The solution:
+ConfigMap and Secret volumes are read-only at the kernel level. Some applications require a writable config directory at startup. The solution:
 
 ```
-ConfigMap (read-only)
-      ↓  init container copies + transforms
-emptyDir (writable)
-      ↓  main container reads and writes
-App process
+ConfigMap volume (readOnly)
+        ↓ init container: cp + transform
+emptyDir volume (writable)
+        ↓ main container mounts and uses
+Application process
 ```
 
-The ConfigMap itself is never modified. The emptyDir lives for the pod's lifetime and is independent per-pod — no shared state between replicas.
+The ConfigMap is never modified. The emptyDir is ephemeral (pod lifetime) and per-pod (no cross-replica sharing).
 
 ---
 
@@ -75,7 +82,7 @@ The ConfigMap itself is never modified. The emptyDir lives for the pod's lifetim
 04-volume-mounts/
 ├── README.md
 └── src/
-    ├── 01-pod-subpath.yaml                 # subPath: mount single file into existing dir
+    ├── 01-pod-subpath.yaml                 # subPath: inject file into existing directory
     ├── 02-pod-permissions.yaml             # defaultMode + per-file mode
     ├── 03-pod-projected.yaml               # projected: ConfigMap + Secret + Downward API
     ├── 04-pod-projected-satoken.yaml       # projected: ServiceAccount token
@@ -144,13 +151,17 @@ stringData:
     MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEA...
     -----END PRIVATE KEY-----
 EOF
+
+# Verify prerequisites exist
+kubectl get configmap nginx-config app-config
+kubectl get secret app-secrets
 ```
 
 ---
 
 ### Step 1 — subPath: inject a single file without replacing the directory
 
-nginx's `/etc/nginx/` ships with `mime.types`, `fastcgi_params`, `conf.d/`, and other files. A plain ConfigMap volume mount at `/etc/nginx/` would hide all of them. `subPath` injects only the specified key as a named file, leaving the directory's existing contents untouched.
+nginx's `/etc/nginx/` ships with `mime.types`, `fastcgi_params`, `conf.d/`, and other files that nginx requires at startup. A plain ConfigMap volume mount at `/etc/nginx/` would hide all of them and nginx would fail to start. `subPath` injects only the specified key as a named file, leaving everything else untouched.
 
 **01-pod-subpath.yaml:**
 ```yaml
@@ -164,66 +175,75 @@ spec:
   - name: nginx-conf
     configMap:
       name: nginx-config
-      # No items filter here — the full ConfigMap is the volume source
-      # subPath on the volumeMount selects one key
+      # No items filter — full ConfigMap is the volume source
+      # subPath on the volumeMount selects which key to inject
 
   initContainers:
   - name: verify
     image: busybox:1.36
-    # Verify the nginx dir contents are visible before nginx starts
-    # (initContainer shares the same volume but checks its own mount)
     command: ["sh", "-c", "echo initContainer complete"]
 
   containers:
   - name: nginx
     image: nginx:1.27
     volumeMounts:
-    # Without subPath: mountPath: /etc/nginx would REPLACE the whole directory
-    # With subPath: only nginx.conf is injected; /etc/nginx/ contents are preserved
+    # subPath: inject only nginx.conf as a single file into /etc/nginx/
+    # The rest of /etc/nginx/ (mime.types, fastcgi_params, conf.d/) is preserved
     - name: nginx-conf
-      mountPath: /etc/nginx/nginx.conf   # full file path, not a directory
-      subPath: nginx.conf                # key name in the ConfigMap
+      mountPath: /etc/nginx/nginx.conf   # target: full file path (not a directory)
+      subPath: nginx.conf                # which key from the ConfigMap volume
       readOnly: true
-    # Mount a second key from the same volume using a second subPath mount
+    # Second key injected using a second subPath volumeMount on the same volume
     - name: nginx-conf
       mountPath: /etc/nginx/conf.d/extra.conf
       subPath: extra.conf
       readOnly: true
-  # If nginx starts successfully without errors, subPath worked correctly —
-  # nginx validates mime.types, fastcgi_params etc. at startup; if they were
-  # hidden by a full directory mount, nginx would exit with a config error.
 ```
 
 ```bash
 kubectl apply -f src/01-pod-subpath.yaml
-kubectl wait --for=condition=Ready pod/pod-subpath --timeout=30s
-
-# nginx is running — meaning mime.types and other files were NOT hidden
-kubectl get pod pod-subpath
-# NAME          READY   STATUS    RESTARTS   AGE
-# pod-subpath   1/1     Running   0          10s
-
-# Confirm both ConfigMap files are injected as individual files
-kubectl exec pod/pod-subpath -- ls -la /etc/nginx/nginx.conf
-kubectl exec pod/pod-subpath -- ls -la /etc/nginx/conf.d/extra.conf
-
-# Confirm native nginx files still exist (they would be gone without subPath)
-kubectl exec pod/pod-subpath -- ls /etc/nginx/mime.types
-kubectl exec pod/pod-subpath -- ls /etc/nginx/fastcgi_params
-
-# Confirm the injected nginx.conf is a regular file (not a symlink — subPath files are direct binds)
-kubectl exec pod/pod-subpath -- ls -la /etc/nginx/nginx.conf
-# -rw-r--r-- ... /etc/nginx/nginx.conf   ← regular file, NOT a symlink
-
-# Compare: a full directory mount produces symlinks; subPath produces a direct bind
-# This is why subPath files do NOT get live updates — no symlink to repoint
-
-# Test nginx responds
-kubectl exec pod/pod-subpath -- wget -qO- http://localhost/health
-# ok
+kubectl wait --for=condition=Ready pod/pod-subpath --timeout=60s
 ```
 
-> **Exam trap:** When asked to mount a ConfigMap key into a specific file path inside a directory that has other contents (e.g. `/etc/nginx/nginx.conf`), always use `subPath`. Mounting to the directory itself destroys the existing contents.
+**Verify:**
+```bash
+kubectl get pod pod-subpath
+# NAME          READY   STATUS    RESTARTS   AGE
+# pod-subpath   1/1     Running   0          15s
+#
+# Observation: nginx is Running — meaning mime.types and fastcgi_params were NOT hidden.
+# If subPath was missing and /etc/nginx was replaced, nginx would have exited with a config error.
+```
+
+```bash
+# Confirm the injected files exist as regular files (not symlinks)
+kubectl exec pod-subpath -- ls -la /etc/nginx/nginx.conf
+# -rw-r--r-- 1 root root ... /etc/nginx/nginx.conf
+#
+# Observation: -rw-r--r-- is a regular file (not lrwxrwxrwx symlink).
+# subPath produces a direct bind-mount — no symlink chain.
+# This is why subPath files do NOT receive live ConfigMap updates.
+
+kubectl exec pod-subpath -- ls -la /etc/nginx/conf.d/extra.conf
+# -rw-r--r-- 1 root root ... /etc/nginx/conf.d/extra.conf
+```
+
+```bash
+# Confirm native nginx files still exist alongside the injected ConfigMap file
+kubectl exec pod-subpath -- ls /etc/nginx/mime.types
+# /etc/nginx/mime.types   ← still present (would be gone without subPath)
+
+kubectl exec pod-subpath -- ls /etc/nginx/fastcgi_params
+# /etc/nginx/fastcgi_params   ← still present
+```
+
+```bash
+# Test nginx is actually serving
+kubectl exec pod-subpath -- wget -qO- http://localhost/health
+# ok
+#
+# Observation: nginx responds correctly — it successfully loaded mime.types and the injected config.
+```
 
 ---
 
@@ -242,49 +262,31 @@ spec:
   - name: config-files
     configMap:
       name: app-config
-      defaultMode: 0444        # applies to all files in this volume
+      defaultMode: 0444   # all files: owner+group+other can read; none can write
       items:
       - key: config.yaml
         path: config.yaml
 
-  # Secret volume: defaultMode 0400 (owner read-only — production standard for secrets)
+  # Secret volume: defaultMode 0400 (owner read-only — production standard)
   - name: secret-files
     secret:
       secretName: app-secrets
-      defaultMode: 0400        # owner read-only — secrets should never be group/world readable
+      defaultMode: 0400   # all files: owner can read only; group+other have NO access
       items:
       - key: db-password
         path: db-password
       - key: tls.key
         path: tls.key
-        mode: 0400             # explicit per-file mode (same as default, shown for clarity)
+        mode: 0400        # explicit per-file override (same as defaultMode here — shown for clarity)
 
   containers:
   - name: app
     image: busybox:1.36
-    command:
-    - sh
-    - -c
-    - |
-      echo "=== Config files (defaultMode 0444) ==="
-      ls -la /etc/app/
-      echo ""
-      echo "=== Secret files (defaultMode 0400) ==="
-      ls -la /etc/secrets/
-      echo ""
-      echo "=== Reading config (0444 — readable by all) ==="
-      cat /etc/app/config.yaml
-      echo ""
-      echo "=== Reading secret (0400 — owner read-only) ==="
-      cat /etc/secrets/db-password
-      echo ""
-      echo "=== Write attempt on readOnly mount (must fail) ==="
-      echo "test" >> /etc/secrets/db-password 2>&1 || echo "EXPECTED: write blocked by readOnly mount"
-      sleep 3600
+    command: ["sh", "-c", "sleep 3600"]
     volumeMounts:
     - name: config-files
       mountPath: /etc/app
-      readOnly: true           # readOnly on the mount — enforced by kernel, independent of file mode
+      readOnly: true     # kernel-enforced: no writes regardless of file mode
     - name: secret-files
       mountPath: /etc/secrets
       readOnly: true
@@ -294,33 +296,62 @@ spec:
 ```bash
 kubectl apply -f src/02-pod-permissions.yaml
 kubectl wait --for=condition=Ready pod/pod-permissions --timeout=30s
+```
 
-kubectl logs pod/pod-permissions
-# === Config files (defaultMode 0444) ===
-# lrwxrwxrwx ... config.yaml -> ..data/config.yaml
-# -r--r--r-- ... (actual file: 0444)
+**Verify file permissions:**
+```bash
+# ConfigMap: defaultMode 0444 — readable by all
+kubectl exec pod-permissions -- ls -la /etc/app/
+# lrwxrwxrwx    config.yaml -> ..data/config.yaml
+# lrwxrwxrwx    ..data -> ..2026_04_26_...
 #
-# === Secret files (defaultMode 0400) ===
-# -r-------- ... db-password    ← 0400 owner read-only
-# -r-------- ... tls.key        ← 0400 owner read-only
+# Observation: symlink entries — actual permissions are on the real file in ..data/
+
+kubectl exec pod-permissions -- ls -la /etc/app/..data/
+# -r--r--r--    config.yaml
 #
-# === Reading config (0444 — readable by all) ===
+# Observation: 0444 — owner, group, and others all have read-only access. No write bit.
+```
+
+```bash
+# Secret: defaultMode 0400 — owner read-only only
+kubectl exec pod-permissions -- ls -la /etc/secrets/..data/
+# -r--------    db-password
+# -r--------    tls.key
+#
+# Observation: 0400 — only owner (root) can read. Group and others have NO permissions.
+# This is the correct production setting for secret files.
+```
+
+```bash
+# Read the files — confirm content is accessible
+kubectl exec pod-permissions -- cat /etc/app/config.yaml
 # server:
 #   port: 8080
-# ...
-#
-# === Reading secret (0400 — owner read-only) ===
+#   timeout: 30s
+# logging:
+#   level: info
+#   format: json
+
+kubectl exec pod-permissions -- cat /etc/secrets/db-password
 # S3cur3P@ss!
+```
+
+```bash
+# Write attempt — must fail due to readOnly: true on the mount
+kubectl exec pod-permissions -- sh -c 'echo "test" >> /etc/secrets/db-password'
+# sh: /etc/secrets/db-password: Read-only file system
 #
-# === Write attempt on readOnly mount (must fail) ===
-# EXPECTED: write blocked by readOnly mount
+# Observation: the kernel rejects the write at the mount level.
+# readOnly: true is independent of file mode — even 0644 files cannot be written
+# when the mount itself is readOnly.
 ```
 
 ---
 
 ### Step 3 — projected volume: ConfigMap + Secret + Downward API in one mountPath
 
-Without `projected`, three sources = three volumes + three volumeMounts = six spec entries. With `projected`, one volume + one volumeMount serves all three. Files are organised into subdirectories via `path` prefixes.
+Without `projected`, three sources = three volumes + three volumeMounts = six spec entries. With `projected`, one volume + one volumeMount serves all three. The `path` field on each item controls the subdirectory and filename within the single mountPath.
 
 **03-pod-projected.yaml:**
 ```yaml
@@ -338,24 +369,24 @@ spec:
   volumes:
   - name: combined
     projected:
-      defaultMode: 0444
+      defaultMode: 0444   # applies to all files unless overridden per source or item
       sources:
-      # Source 1: ConfigMap
+      # Source 1: ConfigMap — files appear at config/ subdir
       - configMap:
           name: app-config
           items:
           - key: config.yaml
-            path: config/config.yaml     # → /etc/combined/config/config.yaml
+            path: config/config.yaml    # → /etc/combined/config/config.yaml
 
-      # Source 2: Secret
+      # Source 2: Secret — files appear at secrets/ subdir with tighter permissions
       - secret:
           name: app-secrets
           items:
           - key: db-password
             path: secrets/db-password   # → /etc/combined/secrets/db-password
-            mode: 0400                  # override to owner read-only
+            mode: 0400                  # override: tighter than defaultMode 0444
 
-      # Source 3: Downward API
+      # Source 3: Downward API — files appear at podinfo/ subdir
       - downwardAPI:
           items:
           - path: podinfo/pod-name
@@ -374,26 +405,10 @@ spec:
   containers:
   - name: app
     image: busybox:1.36
-    command:
-    - sh
-    - -c
-    - |
-      echo "=== All files in projected volume (one mountPath, three sources) ==="
-      find /etc/combined -type f | sort
-      echo ""
-      echo "=== config/config.yaml (from ConfigMap) ==="
-      cat /etc/combined/config/config.yaml
-      echo ""
-      echo "=== secrets/db-password (from Secret, mode 0400) ==="
-      ls -la /etc/combined/secrets/db-password
-      cat /etc/combined/secrets/db-password
-      echo ""
-      echo "=== podinfo/labels (from Downward API) ==="
-      cat /etc/combined/podinfo/labels
-      sleep 3600
+    command: ["sh", "-c", "sleep 3600"]
     volumeMounts:
     - name: combined
-      mountPath: /etc/combined   # single mountPath receives all three sources
+      mountPath: /etc/combined   # one mountPath receives all three sources
       readOnly: true
   restartPolicy: Never
 ```
@@ -401,35 +416,51 @@ spec:
 ```bash
 kubectl apply -f src/03-pod-projected.yaml
 kubectl wait --for=condition=Ready pod/pod-projected --timeout=30s
+```
 
-kubectl logs pod/pod-projected
-# === All files in projected volume (one mountPath, three sources) ===
-# /etc/combined/config/config.yaml
-# /etc/combined/podinfo/annotations
+**Verify the full file tree:**
+```bash
+# find follows symlinks — shows all real files across all three projected sources
+kubectl exec pod-projected -- find /etc/combined -not -name '.*' -type l | sort
+# /etc/combined/config/config.yaml    ← from ConfigMap
+# /etc/combined/podinfo/annotations   ← from Downward API
 # /etc/combined/podinfo/labels
 # /etc/combined/podinfo/namespace
 # /etc/combined/podinfo/pod-name
-# /etc/combined/secrets/db-password
+# /etc/combined/secrets/db-password   ← from Secret
 #
-# === config/config.yaml (from ConfigMap) ===
+# Observation: all three sources land in one directory tree under /etc/combined.
+# Subdirectories (config/, secrets/, podinfo/) come from the path prefix in each item.
+```
+
+```bash
+# Verify ConfigMap content
+kubectl exec pod-projected -- cat /etc/combined/config/config.yaml
 # server:
 #   port: 8080
-# ...
-#
-# === secrets/db-password (from Secret, mode 0400) ===
-# -r-------- ... /etc/combined/secrets/db-password
+#   timeout: 30s
+# logging:
+#   level: info
+#   format: json
+
+# Verify Secret permission and content
+kubectl exec pod-projected -- ls -la /etc/combined/..data/secrets/
+# -r--------    db-password   ← 0400: tighter than defaultMode 0444
+kubectl exec pod-projected -- cat /etc/combined/secrets/db-password
 # S3cur3P@ss!
-#
-# === podinfo/labels (from Downward API) ===
+
+# Verify Downward API content
+kubectl exec pod-projected -- cat /etc/combined/podinfo/labels
 # app="myapp"
 # version="v1.0.0"
+
+kubectl exec pod-projected -- cat /etc/combined/podinfo/pod-name
+# pod-projected
 ```
 
 ---
 
 ### Step 4 — projected ServiceAccount token
-
-The `serviceAccountToken` projection replaces the legacy auto-mounted token. It produces a bound, expiring, audience-scoped JWT that kubelet rotates automatically.
 
 **04-pod-projected-satoken.yaml:**
 ```yaml
@@ -444,20 +475,20 @@ spec:
     projected:
       defaultMode: 0444
       sources:
-      # Modern bound ServiceAccount token
+      # Bound ServiceAccount token — replaces legacy auto-mounted token
       - serviceAccountToken:
           path: token
-          expirationSeconds: 3600        # minimum 600s; kubelet rotates at 80% of TTL
+          expirationSeconds: 3600   # min 600s; kubelet auto-rotates at 80% of TTL
           audience: "https://kubernetes.default.svc"
 
-      # CA cert — needed to verify the API server's TLS certificate
+      # CA cert — verifies the API server's TLS certificate
       - configMap:
-          name: kube-root-ca.crt         # auto-created in every namespace
+          name: kube-root-ca.crt   # auto-created in every namespace by the controller
           items:
           - key: ca.crt
             path: ca.crt
 
-      # Namespace — completes the legacy token equivalent
+      # Namespace — completes the identity bundle
       - downwardAPI:
           items:
           - path: namespace
@@ -467,23 +498,7 @@ spec:
   containers:
   - name: app
     image: busybox:1.36
-    command:
-    - sh
-    - -c
-    - |
-      echo "=== Workload identity bundle ==="
-      ls -la /var/run/secrets/workload/
-      echo ""
-      echo "=== ServiceAccount token (first 100 chars) ==="
-      cat /var/run/secrets/workload/token | cut -c1-100
-      echo "..."
-      echo ""
-      echo "=== Namespace ==="
-      cat /var/run/secrets/workload/namespace
-      echo ""
-      echo "=== CA cert (first line) ==="
-      head -1 /var/run/secrets/workload/ca.crt
-      sleep 3600
+    command: ["sh", "-c", "sleep 3600"]
     volumeMounts:
     - name: workload-identity
       mountPath: /var/run/secrets/workload
@@ -494,31 +509,50 @@ spec:
 ```bash
 kubectl apply -f src/04-pod-projected-satoken.yaml
 kubectl wait --for=condition=Ready pod/pod-projected-satoken --timeout=30s
+```
 
-kubectl logs pod/pod-projected-satoken
-# === Workload identity bundle ===
-# -r--r--r-- ... ca.crt
-# -r--r--r-- ... namespace
-# -r--r--r-- ... token
+**Verify:**
+```bash
+# Confirm all three files are present
+kubectl exec pod-projected-satoken -- ls -la /var/run/secrets/workload/
+# lrwxrwxrwx    ca.crt -> ..data/ca.crt
+# lrwxrwxrwx    namespace -> ..data/namespace
+# lrwxrwxrwx    token -> ..data/token
+# lrwxrwxrwx    ..data -> ..2026_04_26_...
 #
-# === ServiceAccount token (first 100 chars) ===
-# eyJhbGciOiJSUzI1NiIsImtpZCI6Ii...
-# ...
-#
-# === Namespace ===
+# Observation: same symlink structure as ConfigMap volumes — token is rotated
+# by kubelet using the same atomic ..data/ swap mechanism.
+
+kubectl exec pod-projected-satoken -- cat /var/run/secrets/workload/namespace
 # default
-#
-# === CA cert (first line) ===
-# -----BEGIN CERTIFICATE-----
 
-# Verify it's a JWT with the correct audience — decode the payload
-kubectl exec pod/pod-projected-satoken -- sh -c '
+kubectl exec pod-projected-satoken -- head -1 /var/run/secrets/workload/ca.crt
+# -----BEGIN CERTIFICATE-----
+```
+
+```bash
+# Verify the token is a JWT and decode the payload
+kubectl exec pod-projected-satoken -- sh -c '
   TOKEN=$(cat /var/run/secrets/workload/token)
+  echo "Token starts with: $(echo $TOKEN | cut -c1-30)..."
   PAYLOAD=$(echo $TOKEN | cut -d. -f2)
-  echo $PAYLOAD | base64 -d 2>/dev/null
+  # Add padding for base64 decode
+  MOD=$((${#PAYLOAD} % 4))
+  [ $MOD -ne 0 ] && PAYLOAD="${PAYLOAD}$(printf "=%.0s" $(seq 1 $((4-MOD))))"
+  echo "Decoded payload:"
+  echo "$PAYLOAD" | base64 -d 2>/dev/null
 '
-# {"aud":["https://kubernetes.default.svc"],"exp":...,"iat":...,"iss":"https://kubernetes.default.svc",...}
-# exp - iat = 3600  ← matches expirationSeconds
+# Token starts with: eyJhbGciOiJSUzI1NiIsImtpZCI6...
+# Decoded payload:
+# {"aud":["https://kubernetes.default.svc"],"exp":1745700000,"iat":1745696400,
+#  "iss":"https://kubernetes.default.svc","kubernetes.io":{"namespace":"default",
+#  "pod":{"name":"pod-projected-satoken","uid":"..."},...},"sub":"system:serviceaccount:default:default"}
+#
+# Observation:
+# aud: matches the audience configured in expirationSeconds → audience field
+# exp - iat = 3600 seconds — matches expirationSeconds
+# kubernetes.io.pod.name — token is bound to this specific pod (invalidated on pod delete)
+# sub: system:serviceaccount:default:default — the ServiceAccount identity
 ```
 
 ---
@@ -533,13 +567,8 @@ metadata:
   name: pod-initcontainer-writable
   namespace: default
 spec:
-  # Problem: some apps must write to their config directory at startup.
-  # ConfigMap/Secret mounts are read-only — they cannot be written to.
-  # Solution: init container copies ConfigMap files to an emptyDir volume.
-  # The main container mounts the emptyDir, which is writable.
-
   volumes:
-  # Source: ConfigMap (read-only — cannot write here)
+  # Source: ConfigMap (kernel read-only — cannot write)
   - name: config-source
     configMap:
       name: app-config
@@ -547,7 +576,7 @@ spec:
       - key: config.yaml
         path: config.yaml
 
-  # Destination: emptyDir (writable, ephemeral, lives for pod lifetime)
+  # Destination: emptyDir (writable, pod-lifetime, per-pod)
   - name: config-writable
     emptyDir: {}
 
@@ -558,78 +587,89 @@ spec:
     - sh
     - -c
     - |
-      echo "=== Copying config from ConfigMap mount to writable emptyDir ==="
+      echo "=== Copying ConfigMap file to writable emptyDir ==="
       cp /config-source/config.yaml /config-writable/config.yaml
+      echo "Copied config.yaml"
 
-      # Simulate template substitution (envsubst, sed, custom scripts)
+      # Simulate startup-time template substitution
       sed -i "s/port: 8080/port: 9090/" /config-writable/config.yaml
-      echo "Applied port substitution"
+      echo "Applied port substitution (8080 → 9090)"
 
-      echo "=== Final config written to writable volume ==="
+      echo "=== Final config in writable volume ==="
       cat /config-writable/config.yaml
     volumeMounts:
     - name: config-source
       mountPath: /config-source
-      readOnly: true
+      readOnly: true       # read from ConfigMap
     - name: config-writable
-      mountPath: /config-writable
+      mountPath: /config-writable   # write to emptyDir
 
   containers:
   - name: app
     image: busybox:1.36
-    command:
-    - sh
-    - -c
-    - |
-      echo "=== App reading from writable config volume ==="
-      cat /etc/app/config.yaml
-      echo ""
-      echo "=== Writing app runtime state to same volume (allowed) ==="
-      echo "started_at: $(date)" >> /etc/app/runtime.state
-      cat /etc/app/runtime.state
-      echo ""
-      echo "=== Write attempt on original ConfigMap mount (must fail) ==="
-      echo "test" >> /etc/app-source/config.yaml 2>&1 || echo "EXPECTED: read-only filesystem"
-      sleep 3600
+    command: ["sh", "-c", "sleep 3600"]
     volumeMounts:
     - name: config-writable
-      mountPath: /etc/app          # writable — app can read AND write here
+      mountPath: /etc/app          # writable — main container reads and writes here
     - name: config-source
       mountPath: /etc/app-source
-      readOnly: true               # original ConfigMap — strictly read-only
+      readOnly: true               # original ConfigMap — read-only reference
   restartPolicy: Never
 ```
 
 ```bash
 kubectl apply -f src/05-pod-initcontainer-writable.yaml
 kubectl wait --for=condition=Ready pod/pod-initcontainer-writable --timeout=60s
+```
 
-# Check init container output
-kubectl logs pod/pod-initcontainer-writable -c copy-config
-# === Copying config from ConfigMap mount to writable emptyDir ===
-# Applied port substitution
-# === Final config written to writable volume ===
+**Verify init container output:**
+```bash
+kubectl logs pod-initcontainer-writable -c copy-config
+# === Copying ConfigMap file to writable emptyDir ===
+# Copied config.yaml
+# Applied port substitution (8080 → 9090)
+# === Final config in writable volume ===
 # server:
-#   port: 9090          ← substituted from 8080 by init container
-# ...
-
-# Check main container
-kubectl logs pod/pod-initcontainer-writable -c app
-# === App reading from writable config volume ===
-# server:
-#   port: 9090          ← sees the init container's transformed version
-# ...
-# === Writing app runtime state to same volume (allowed) ===
-# started_at: Sun Apr 19 ...
+#   port: 9090          ← substituted by init container
+#   timeout: 30s
+# logging:
+#   level: info
+#   format: json
 #
-# === Write attempt on original ConfigMap mount (must fail) ===
-# EXPECTED: read-only filesystem
+# Observation: init container successfully copied and transformed the config.
+# The ConfigMap itself was never modified — only the emptyDir copy was changed.
+```
 
-# Confirm the emptyDir is writable by the main container
-kubectl exec pod/pod-initcontainer-writable -c app -- \
-  sh -c 'echo "live write $(date)" >> /etc/app/runtime.state && cat /etc/app/runtime.state'
-# started_at: ...
-# live write ...        ← new write succeeded
+**Verify main container sees the transformed config:**
+```bash
+kubectl exec pod-initcontainer-writable -c app -- cat /etc/app/config.yaml
+# server:
+#   port: 9090    ← sees the init container's transformed version
+#   timeout: 30s
+# ...
+#
+# Observation: main container reads from emptyDir (writable copy), not the ConfigMap.
+
+# Verify the original ConfigMap mount is still unchanged and read-only
+kubectl exec pod-initcontainer-writable -c app -- cat /etc/app-source/config.yaml
+# server:
+#   port: 8080    ← original value — ConfigMap was never modified
+```
+
+```bash
+# Confirm the emptyDir is writable — main container can write runtime state
+kubectl exec pod-initcontainer-writable -c app -- \
+  sh -c 'echo "started_at: $(date)" >> /etc/app/runtime.state && cat /etc/app/runtime.state'
+# started_at: Mon Apr 26 ...
+#
+# Observation: write succeeded — emptyDir is writable by the main container.
+
+# Confirm the ConfigMap mount is NOT writable
+kubectl exec pod-initcontainer-writable -c app -- \
+  sh -c 'echo "test" >> /etc/app-source/config.yaml 2>&1'
+# sh: /etc/app-source/config.yaml: Read-only file system
+#
+# Observation: write blocked — readOnly: true on the ConfigMap volumeMount is kernel-enforced.
 ```
 
 ---
@@ -637,9 +677,10 @@ kubectl exec pod/pod-initcontainer-writable -c app -- \
 ### Step 6 — Cleanup
 
 ```bash
-kubectl delete pod pod-subpath pod-permissions pod-projected pod-projected-satoken pod-initcontainer-writable
-kubectl delete configmap nginx-config app-config
-kubectl delete secret app-secrets
+kubectl delete pod pod-subpath pod-permissions pod-projected pod-projected-satoken \
+  pod-initcontainer-writable 2>/dev/null || true
+kubectl delete configmap nginx-config app-config 2>/dev/null || true
+kubectl delete secret app-secrets 2>/dev/null || true
 ```
 
 ---
@@ -648,12 +689,15 @@ kubectl delete secret app-secrets
 
 | Concept | Detail |
 |---------|--------|
-| `subPath` | Injects one key as one file; preserves existing directory contents; no live updates |
-| Full directory mount | All keys become files; live updates via kubelet symlink rotation; existing dir contents hidden |
-| `defaultMode` | Octal permission for all files in volume; `0444` for ConfigMaps, `0400` for Secrets |
-| `items[].mode` | Per-file override; useful for private keys (`0400`) within a volume with looser `defaultMode` |
-| `readOnly: true` on mount | Kernel-enforced; independent of file mode; always set for Secrets |
-| `projected` | One volume, one mountPath, up to four source types; paths control subdirectory layout |
-| `serviceAccountToken` | Bound JWT: pod-UID-scoped, expiring, audience-scoped, auto-rotated by kubelet |
-| `kube-root-ca.crt` | Auto-created ConfigMap in every namespace; project alongside SA token for full bundle |
-| `emptyDir` + init container | The correct pattern when an app needs a writable config dir; ConfigMap is never mutated |
+| `subPath` file type | Produces a regular file (bind-mount) — NOT a symlink; no live updates on CM change |
+| Full directory mount | Produces symlinks via `..data/` chain; live updates via atomic `rename()` swap |
+| `subPath` preservation | Existing directory contents are preserved — only the specified file is added/replaced |
+| `defaultMode` | Octal permission applied to all files in the volume; `0444` for ConfigMaps, `0400` for Secrets |
+| `items[].mode` | Per-file permission override; takes priority over `defaultMode` |
+| `readOnly: true` | Kernel-enforced at mount level; independent of file mode; always set for Secrets |
+| `projected` advantage | One volume + one volumeMount for multiple sources; paths control subdirectory layout |
+| `serviceAccountToken` | Bound JWT: pod-UID-scoped, audience-scoped, expiring, auto-rotated by kubelet at 80% TTL |
+| `kube-root-ca.crt` | Auto-created ConfigMap in every namespace; project alongside SA token for full workload identity bundle |
+| `emptyDir` + init container | Correct pattern for writable config; ConfigMap is read-only source, emptyDir is writable destination |
+| Init container ordering | Init containers complete before main containers start — safe for config preparation |
+| Write error message | `sh: /path/file: Read-only file system` — kernel error when writing to a `readOnly: true` mount |
