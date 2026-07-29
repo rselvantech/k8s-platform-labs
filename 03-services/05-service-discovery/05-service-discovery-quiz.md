@@ -154,10 +154,27 @@ Trap: A keeps the dots from the original IP, which isn't valid — CoreDNS's `po
 
 </details>
 
+---
+
+**Q10. What does the CoreDNS `loadbalance` plugin actually do?**
+
+- A) Distributes CoreDNS's own workload across replica pods
+- B) Randomizes the order of A/AAAA records in a DNS response
+- C) Balances traffic between ClusterIP and NodePort Services
+- D) Assigns weights to different backend pods based on CPU usage
+
+<details>
+<summary>Answer</summary>
+
+**B** — This is the actual mechanism behind a headless Service (`04-headless`) returning pod IPs in a different order each query — CoreDNS itself is doing the shuffling, not kube-proxy or the Service object.
+Trap: A confuses this with CoreDNS's own pod-level scaling (a separate, unrelated concern) rather than what it does to the *content* of a DNS response.
+
+</details>
+
 Score guide:
 | Score | Action |
 |---|---|
-| 9/9 | Import Anki cards, move to next chapter |
-| 8/9 | Review the wrong answer, then proceed |
-| 6-7/9 | Re-read the relevant section, retry those questions |
-| Below 6/9 | Re-read the full demo and redo the walkthrough before proceeding |
+| 9-10/10 | Import Anki cards, move to next chapter |
+| 8/10 | Review the wrong answer, then proceed |
+| 6-7/10 | Re-read the relevant section, retry those questions |
+| Below 6/10 | Re-read the full demo and redo the walkthrough before proceeding |

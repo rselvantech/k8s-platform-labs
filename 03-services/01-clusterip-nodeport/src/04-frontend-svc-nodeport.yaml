@@ -7,7 +7,7 @@ spec:
   selector:
     app: frontend
   ports:
-    - port: 80 # ClusterIP port (internal)
-      targetPort: 80 # container port
-      nodePort: 31000 # external port on every node (30000-32767)
+    - port: 80         # ClusterIP port (internal)
+      targetPort: 80   # container port
+      nodePort: 31000  # external port on every node (30000-32767)
       protocol: TCP

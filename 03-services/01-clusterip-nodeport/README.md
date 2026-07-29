@@ -435,13 +435,13 @@ spec:
       protocol: TCP
 ```
 
-| Field                     | Required / Default                    | Description                                                                                                                               |
-| ------------------------- | ------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
-| `spec.type`               | No — defaults to `ClusterIP`          | Set explicitly here for clarity; omitting it has the identical effect                                                                     |
-| `spec.selector`           | Yes                                   | Which pods this Service routes to — matched against pod labels, not the Deployment object itself                                          |
-| `spec.ports[].port`       | Yes                                   | Port the Service itself listens on — what other pods/clients use to reach it                                                              |
+| Field | Required / Default | Description |
+|---|---|---|
+| `spec.type` | No — defaults to `ClusterIP` | Set explicitly here for clarity; omitting it has the identical effect |
+| `spec.selector` | Yes | Which pods this Service routes to — matched against pod labels, not the Deployment object itself |
+| `spec.ports[].port` | Yes | Port the Service itself listens on — what other pods/clients use to reach it |
 | `spec.ports[].targetPort` | No — defaults to same value as `port` | Port the container actually listens on; only needs to differ when the app's internal port differs from the Service's external-facing port |
-| `spec.ports[].protocol`   | No — defaults to `TCP`                | Set explicitly here for clarity                                                                                                           |
+| `spec.ports[].protocol` | No — defaults to `TCP` | Set explicitly here for clarity |
 
 ```bash
 kubectl apply -f 02-backend-svc-clusterip.yaml
@@ -513,7 +513,7 @@ backend-svc   10.244.1.x:5678,10.244.1.x:5678,10.244.2.x:5678
 
 > When a pod matching the selector is added or removed, the endpoints
 > list updates automatically — no manual changes needed. `kubectl get
-endpoints` is the older, now-deprecated view of this data — the
+> endpoints` is the older, now-deprecated view of this data — the
 > current API (`EndpointSlices`), why it replaced this one, and full
 > readiness-tracking detail are `02-service-internals`'s entire subject.
 
@@ -703,7 +703,7 @@ exit
 ### Step 6: Create NodePort Service for Frontend
 
 Internal connectivity is proven — this step makes the frontend reachable
-from _outside_ the cluster too, completing the two-tier architecture
+from *outside* the cluster too, completing the two-tier architecture
 from this demo's Lab Overview.
 
 #### Frontend NodePort Service
@@ -725,20 +725,20 @@ spec:
   selector:
     app: frontend
   ports:
-    - port: 80 # ClusterIP port (internal)
-      targetPort: 80 # container port
-      nodePort: 31000 # external port on every node (30000-32767)
+    - port: 80         # ClusterIP port (internal)
+      targetPort: 80   # container port
+      nodePort: 31000  # external port on every node (30000-32767)
       protocol: TCP
 ```
 
-| Field                     | Required / Default                             | Description                                                                                                 |
-| ------------------------- | ---------------------------------------------- | ----------------------------------------------------------------------------------------------------------- |
-| `spec.type`               | Yes (must be set to `NodePort` explicitly)     | Unlike `ClusterIP`, this is never the default — must be stated                                              |
-| `spec.selector`           | Yes                                            | Which pods this Service routes to                                                                           |
-| `spec.ports[].port`       | Yes                                            | The auto-provisioned ClusterIP's own port — internal cluster traffic still uses this                        |
-| `spec.ports[].targetPort` | No — defaults to same value as `port`          | Port the container actually listens on                                                                      |
-| `spec.ports[].nodePort`   | No — auto-assigned from 30000-32767 if omitted | The port opened on every node; set explicitly here so it's predictable for curl commands later in this step |
-| `spec.ports[].protocol`   | No — defaults to `TCP`                         | Set explicitly here for clarity                                                                             |
+| Field | Required / Default | Description |
+|---|---|---|
+| `spec.type` | Yes (must be set to `NodePort` explicitly) | Unlike `ClusterIP`, this is never the default — must be stated |
+| `spec.selector` | Yes | Which pods this Service routes to |
+| `spec.ports[].port` | Yes | The auto-provisioned ClusterIP's own port — internal cluster traffic still uses this |
+| `spec.ports[].targetPort` | No — defaults to same value as `port` | Port the container actually listens on |
+| `spec.ports[].nodePort` | No — auto-assigned from 30000-32767 if omitted | The port opened on every node; set explicitly here so it's predictable for curl commands later in this step |
+| `spec.ports[].protocol` | No — defaults to `TCP` | Set explicitly here for clarity |
 
 ```bash
 kubectl apply -f 04-frontend-svc-nodeport.yaml
@@ -1450,6 +1450,7 @@ kubectl get pods -l <selector> -o wide
 "Can you pin a Service's nodePort to a specific number using only kubectl expose flags?","No — kubectl expose has no flag for it; you must set spec.ports[].nodePort explicitly in YAML (or --dry-run=client -o yaml, then edit)","demo01-services,imperative,nodeport,ckad-application-deployment"
 "If every backend pod returns an identical response, does that prove load balancing isn't happening?","No — it just means you can't tell from response content alone; you need distinguishing data per pod (e.g. pod name/hostname in the response) to actually verify load balancing is occurring","demo01-services,load-balancing,debugging,cka-troubleshooting"
 "What does IP Family Policy: SingleStack mean on a Service?","The Service uses only one IP family (IPv4 or IPv6), not both at once — dual-stack Services exist via PreferDualStack/RequireDualStack instead, which this demo's cluster isn't configured for","demo01-services,networking,dual-stack,cka-services-networking"
+"Does spec.ports[].protocol need to be set explicitly?","No — it defaults to TCP if omitted, same as omitting spec.type defaults to ClusterIP","demo01-services,service-fields,cka-services-networking"
 ```
 
 ---
@@ -1475,7 +1476,7 @@ kubectl get pods -l <selector> -o wide
 <details>
 <summary>Answer</summary>
 
-**B** — `describe svc` shows the port mapping as configured, not validated against what the container actually listens on. Healthy Endpoints only confirms the _pods_ are fine and selected correctly, not that the port mapping is correct.
+**B** — `describe svc` shows the port mapping as configured, not validated against what the container actually listens on. Healthy Endpoints only confirms the *pods* are fine and selected correctly, not that the port mapping is correct.
 Trap: A is ruled out by the premise — "3 healthy Endpoints" already means the pods are Running and Ready.
 
 </details>
@@ -1493,7 +1494,7 @@ Trap: A is ruled out by the premise — "3 healthy Endpoints" already means the 
 <summary>Answer</summary>
 
 **B** — Expecting IP stability from the Pod layer at all is the wrong mental model — that's precisely the problem Services solve, at a different layer entirely.
-Trap: C sounds plausible if you've heard "StatefulSets give stable identity," but that's stable _network identity via DNS_, not stable _IP addresses_ — a distinction this demo doesn't cover but is worth not overgeneralizing from.
+Trap: C sounds plausible if you've heard "StatefulSets give stable identity," but that's stable *network identity via DNS*, not stable *IP addresses* — a distinction this demo doesn't cover but is worth not overgeneralizing from.
 
 </details>
 
@@ -1577,7 +1578,7 @@ Trap: A is a real trap for people newer to Kubernetes — Services genuinely hav
 <details>
 <summary>Answer</summary>
 
-**B** — The taint only affects _pod scheduling_, not NodePort's own behavior — kube-proxy opens the NodePort on every node regardless of taints or what's actually running there.
+**B** — The taint only affects *pod scheduling*, not NodePort's own behavior — kube-proxy opens the NodePort on every node regardless of taints or what's actually running there.
 Trap: C sounds plausible because taints were just covered in Step 1, but a scheduling taint and NodePort's per-node listener are unrelated mechanisms.
 
 </details>
@@ -1595,7 +1596,7 @@ Trap: C sounds plausible because taints were just covered in Step 1, but a sched
 <summary>Answer</summary>
 
 **B** — `--port` controls the ClusterIP-facing port, not `nodePort` — to pin the actual external port you need `spec.ports[].nodePort` set explicitly, which means YAML (or `--dry-run=client -o yaml` then edit).
-Trap: C overcorrects — nodePort _can_ be fixed, just not through `kubectl expose`'s flags alone.
+Trap: C overcorrects — nodePort *can* be fixed, just not through `kubectl expose`'s flags alone.
 
 </details>
 
@@ -1612,7 +1613,7 @@ Trap: C overcorrects — nodePort _can_ be fixed, just not through `kubectl expo
 <summary>Answer</summary>
 
 **B** — Verifying load balancing requires distinguishing data per pod (like a pod name embedded in the response) — identical output across pods is a testing-setup limitation, not evidence about routing behavior.
-Trap: A and C both draw a routing conclusion from response _content_, when content and routing are actually independent of each other here.
+Trap: A and C both draw a routing conclusion from response *content*, when content and routing are actually independent of each other here.
 
 </details>
 

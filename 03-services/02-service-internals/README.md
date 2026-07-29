@@ -864,6 +864,8 @@ for imperative Service creation.
 "How does iptables achieve roughly equal load distribution across 3 pod endpoints?","Cascading statistic-mode probabilities: 0.333 for the first, 0.500 of the remainder for the second, everything left for the third — netting out to roughly 1/3 each","demo02-services,iptables,load-balancing,cka-services-networking"
 "If every backend pod returns identical response text, does that prove load balancing isn't working?","No — it just means you can't observe it from response content; distinguishing data per pod (like an injected pod name) is needed to actually verify routing","demo02-services,load-balancing,debugging,cka-troubleshooting"
 "What kube-proxy modes exist on Linux, and what is ipvs's current status?","iptables, nftables, and ipvs — ipvs was formally deprecated in Kubernetes v1.35; nftables is the currently recommended mode for new clusters on modern kernels","demo02-services,kube-proxy,cka-services-networking"
+"What field actually links a manually-created EndpointSlice to its Service?","The metadata.labels[kubernetes.io/service-name] label — get it wrong and the Service has no endpoints at all, with no error","demo02-services,endpointslices,selectorless,cka-services-networking"
+"Does a manually-created EndpointSlice need conditions.ready set explicitly?","Yes — unlike a selector-based EndpointSlice where the controller computes it, nothing computes readiness for a manual one; omitting it is not the same as setting it true","demo02-services,endpointslices,selectorless,cka-services-networking"
 ````
 
 ---
@@ -1012,11 +1014,28 @@ Trap: C overstates the situation — deprecated is not the same as removed; exis
 
 </details>
 
+---
+
+**Q9. You hand-write an EndpointSlice for a selectorless Service, but the Service still shows no working endpoints. What's the most likely cause?**
+
+- A) Selectorless Services can never have working endpoints
+- B) The `kubernetes.io/service-name` label on the EndpointSlice doesn't match the Service's actual name
+- C) EndpointSlices always require a selector to function
+- D) The `port` field was omitted
+
+<details>
+<summary>Answer</summary>
+
+**B** — This label is the *only* thing linking a manually-created EndpointSlice to its Service; get it wrong and the Service has no endpoints at all, with no error pointing at the cause.
+Trap: C contradicts the entire premise of this demo's selectorless pattern — EndpointSlices work perfectly well without a selector, that's the point.
+
+</details>
+
 Score guide:
 | Score | Action |
 |---|---|
-| 8/8 | Import Anki cards, move to next Demo |
-| 7/8 | Review the wrong answer, then proceed |
-| 6/8 | Re-read the relevant section, retry those questions |
-| Below 6/8 | Re-read the full demo and redo the walkthrough before proceeding |
+| 8-9/9 | Import Anki cards, move to next Demo |
+| 7/9 | Review the wrong answer, then proceed |
+| 6/9 | Re-read the relevant section, retry those questions |
+| Below 6/9 | Re-read the full demo and redo the walkthrough before proceeding |
 ````

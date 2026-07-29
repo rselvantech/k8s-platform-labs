@@ -13,7 +13,7 @@
 <details>
 <summary>Answer</summary>
 
-**B** — `describe svc` shows the port mapping as configured, not validated against what the container actually listens on. Healthy Endpoints only confirms the _pods_ are fine and selected correctly, not that the port mapping is correct.
+**B** — `describe svc` shows the port mapping as configured, not validated against what the container actually listens on. Healthy Endpoints only confirms the *pods* are fine and selected correctly, not that the port mapping is correct.
 Trap: A is ruled out by the premise — "3 healthy Endpoints" already means the pods are Running and Ready.
 
 </details>
@@ -31,7 +31,7 @@ Trap: A is ruled out by the premise — "3 healthy Endpoints" already means the 
 <summary>Answer</summary>
 
 **B** — Expecting IP stability from the Pod layer at all is the wrong mental model — that's precisely the problem Services solve, at a different layer entirely.
-Trap: C sounds plausible if you've heard "StatefulSets give stable identity," but that's stable _network identity via DNS_, not stable _IP addresses_ — a distinction this demo doesn't cover but is worth not overgeneralizing from.
+Trap: C sounds plausible if you've heard "StatefulSets give stable identity," but that's stable *network identity via DNS*, not stable *IP addresses* — a distinction this demo doesn't cover but is worth not overgeneralizing from.
 
 </details>
 
@@ -115,7 +115,7 @@ Trap: A is a real trap for people newer to Kubernetes — Services genuinely hav
 <details>
 <summary>Answer</summary>
 
-**B** — The taint only affects _pod scheduling_, not NodePort's own behavior — kube-proxy opens the NodePort on every node regardless of taints or what's actually running there.
+**B** — The taint only affects *pod scheduling*, not NodePort's own behavior — kube-proxy opens the NodePort on every node regardless of taints or what's actually running there.
 Trap: C sounds plausible because taints were just covered in Step 1, but a scheduling taint and NodePort's per-node listener are unrelated mechanisms.
 
 </details>
@@ -133,7 +133,7 @@ Trap: C sounds plausible because taints were just covered in Step 1, but a sched
 <summary>Answer</summary>
 
 **B** — `--port` controls the ClusterIP-facing port, not `nodePort` — to pin the actual external port you need `spec.ports[].nodePort` set explicitly, which means YAML (or `--dry-run=client -o yaml` then edit).
-Trap: C overcorrects — nodePort _can_ be fixed, just not through `kubectl expose`'s flags alone.
+Trap: C overcorrects — nodePort *can* be fixed, just not through `kubectl expose`'s flags alone.
 
 </details>
 
@@ -150,7 +150,7 @@ Trap: C overcorrects — nodePort _can_ be fixed, just not through `kubectl expo
 <summary>Answer</summary>
 
 **B** — Verifying load balancing requires distinguishing data per pod (like a pod name embedded in the response) — identical output across pods is a testing-setup limitation, not evidence about routing behavior.
-Trap: A and C both draw a routing conclusion from response _content_, when content and routing are actually independent of each other here.
+Trap: A and C both draw a routing conclusion from response *content*, when content and routing are actually independent of each other here.
 
 </details>
 

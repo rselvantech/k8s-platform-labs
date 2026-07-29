@@ -1125,6 +1125,8 @@ minikube ssh -p 3node "cat /etc/resolv.conf"
 "A single Service name returns NXDOMAIN, but nslookup kubernetes.default works. What does that narrow down?","CoreDNS itself is healthy — the problem is specific to that Service: wrong namespace, doesn't exist, or no Ready pods","demo05-services,troubleshooting,cka-troubleshooting"
 "What's the blast radius when CoreDNS itself crashes vs. when a single Service is misconfigured?","CoreDNS crashing breaks DNS resolution for the entire cluster simultaneously; a single Service misconfiguration only affects that one Service's name","demo05-services,coredns,cka-troubleshooting"
 "What CoreDNS plugin handles non-cluster DNS queries like google.com?","forward — forwards them to the node's own /etc/resolv.conf","demo05-services,coredns,cka-services-networking"
+"What does the CoreDNS cache plugin do, and what's its default TTL for cluster DNS?","Caches DNS responses to reduce repeated load on CoreDNS — 30 seconds by default in the standard Corefile","demo05-services,coredns,cka-services-networking"
+"What does the CoreDNS loadbalance plugin do?","Randomizes the order of A/AAAA records in a response — this is the actual mechanism behind headless Services returning pod IPs in a different order each query","demo05-services,coredns,headless,cka-services-networking"
 "What's the DNS format for resolving an individual pod directly, without a Service?","<pod-ip-with-dashes>.<namespace>.pod.<cluster-domain> — e.g. 10.244.1.23 becomes 10-244-1-23.backend-ns.pod.cluster.local","demo05-services,dns,pod-dns,cka-services-networking"
 ````
 
@@ -1291,11 +1293,28 @@ Trap: A keeps the dots from the original IP, which isn't valid — CoreDNS's `po
 
 </details>
 
+---
+
+**Q10. What does the CoreDNS `loadbalance` plugin actually do?**
+
+- A) Distributes CoreDNS's own workload across replica pods
+- B) Randomizes the order of A/AAAA records in a DNS response
+- C) Balances traffic between ClusterIP and NodePort Services
+- D) Assigns weights to different backend pods based on CPU usage
+
+<details>
+<summary>Answer</summary>
+
+**B** — This is the actual mechanism behind a headless Service (`04-headless`) returning pod IPs in a different order each query — CoreDNS itself is doing the shuffling, not kube-proxy or the Service object.
+Trap: A confuses this with CoreDNS's own pod-level scaling (a separate, unrelated concern) rather than what it does to the *content* of a DNS response.
+
+</details>
+
 Score guide:
 | Score | Action |
 |---|---|
-| 9/9 | Import Anki cards, move to next chapter |
-| 8/9 | Review the wrong answer, then proceed |
-| 6-7/9 | Re-read the relevant section, retry those questions |
-| Below 6/9 | Re-read the full demo and redo the walkthrough before proceeding |
+| 9-10/10 | Import Anki cards, move to next chapter |
+| 8/10 | Review the wrong answer, then proceed |
+| 6-7/10 | Re-read the relevant section, retry those questions |
+| Below 6/10 | Re-read the full demo and redo the walkthrough before proceeding |
 ````
