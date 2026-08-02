@@ -5,8 +5,15 @@ metadata:
   namespace: default
 spec:
   volumes:
-  # Volume-1: backed by app-files ConfigMap
-  - name: config-files       # volume name — referenced in volumeMounts below
+
+  # Volume-1: backed by release-config (immutable ConfigMap — mountable like any other)
+  - name: release-files      # volume name — referenced in volumeMounts below
+    configMap:
+      name: release-config   # immutable ConfigMap — also mountable as volume
+      # defaultMode: 0444    # optional: permission for all files in this volume (default 0644)
+
+  # Volume-2: backed by app-files ConfigMap
+  - name: config-files       
     configMap:
       name: app-files        # the ConfigMap to project
       # items: selectively project only some keys and control filenames
@@ -17,15 +24,11 @@ spec:
       - key: app.properties
         path: app.properties
         # mode: 0400           # optional: per-file permission (octal)
-  # Volume-2: backed by release-config (immutable ConfigMap — mountable like any other)
-  - name: release-files
-    configMap:
-      name: release-config   # immutable ConfigMap — also mountable as volume
-      # defaultMode: 0444    # optional: permission for all files in this volume (default 0644)
+
 
   containers:
   - name: app
-    image: busybox:1.36
+    image: busybox:1.38.0
     command:
     - sh
     - -c

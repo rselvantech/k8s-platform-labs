@@ -1,0 +1,8 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: duplicate-key-config
+data:
+  server.crt: "some-text-value"
+binaryData:
+  server.crt: c29tZS1iaW5hcnktdmFsdWU=   # same key name as in data above

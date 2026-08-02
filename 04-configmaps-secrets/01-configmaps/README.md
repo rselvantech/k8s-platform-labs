@@ -63,8 +63,8 @@ By the end of this lab, you will be able to:
     ├── 05-pod-env-valueFrom.yaml        # Pod consuming specific keys via valueFrom
     ├── 06-pod-volume.yaml               # Pod consuming ConfigMap as volume-mounted files
     └── break-fix/
-        ├── 01-size-limit-exceeded.yaml       # Embedded inline in README — not generated on disk
-        └── 02-duplicate-key-overlap.yaml     # Embedded inline in README — not generated on disk
+        ├── 01-size-limit-exceeded.yaml       # Create Imperatively
+        └── 02-duplicate-key-overlap.yaml     
 ```
 
 ---
@@ -156,19 +156,32 @@ binaryData:
 The `|` character is standard YAML syntax, not Kubernetes-specific. It signals: everything indented below this line is a literal string — newlines are preserved exactly as written. The leading indentation of the block is stripped by the YAML parser; the content itself is preserved as-is.
 
 ```yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: chomping-demo
 data:
-  config.yaml: |    # | = preserve all newlines; strip one final trailing newline
-    key: value
-    nested:
-      field: true
-  script.sh: |-     # |- = strip ALL trailing newlines (useful for shell scripts)
-    #!/bin/sh
-    echo hello
-  notes.txt: |+     # |+ = keep ALL trailing newlines (rarely needed)
+  clip-example.txt: |
     line one
+    line two
+
+
+  strip-example.txt: |-
+    line one
+    line two
+
+
+  keep-example.txt: |+
+    line one
+    line two
+
+
+  zzz-end-marker: "boundary — makes keep-example.txt's trailing blank lines unambiguous, not just EOF"
 ```
 
 Standard `|` is almost always correct for config files. The YAML parser strips the minimum shared indentation from the block and the result becomes the file content when volume-mounted.
+
+>**Note:** See **Appendix — YAML Literal Block Scalar Resulting Values** for the exact, character-by-character resulting string for all three variants shown above.
 
 ----
 
@@ -196,6 +209,7 @@ Setting `immutable: true` tells the API server: **stop issuing watch events for 
 - Protects against accidental misconfiguration — `kubectl edit` and `kubectl patch` are both rejected
 - Eliminates the watch connection overhead for this ConfigMap on every node
 - Makes the ConfigMap's identity stable — safe to reference by name in GitOps and CI/CD pipelines
+- Makes the ConfigMap's identity stable — safe to reference by name in GitOps and CI/CD pipelines (`05-kustomize-config-secret-management` covers this exact concept hands-on, in full, with a concrete mutable-vs-immutable example)
 - Forces a deliberate delete+recreate workflow for any change (auditable, reviewed, intentional)
 
 ----
@@ -226,30 +240,36 @@ minikube ssh -p 3node -- sudo grep -i sync /var/lib/kubelet/config.yaml
 ```
 > **What `0s` means:** A value of `0s` does NOT mean sync is disabled or instant. It means "use the compiled-in default". The compiled-in default is **1 minute**. minikube ships with `syncFrequency: 0s` as a sentinel value to indicate "no override — use the default". The effective sync interval is 1 minute.
 
-**Full update flow for a volume-mounted ConfigMap:**
+**Full update flow for a volume-mounted ConfigMap — including who opens the watch, and when:**
 
-```
-ConfigMap updated  →  etcd stores new version
-        ↓
-  API server emits watch event (near-instant, milliseconds)
-        ↓
-  kubelet on the node receives event via open watch connection
-        ↓
-  kubelet queues a sync for this ConfigMap volume
-        ↓
-  Next sync cycle fires (within syncFrequency window, effective default: 1 min)
-        ↓
-  kubelet fetches new content from the API server
-        ↓
-  Atomic symlink swap on the node filesystem
-        ↓
-  Files inside the pod show new content — no pod restart needed
-```
-> In practice the delay is **10–90 seconds** — depends on where the watch event lands relative to the current sync cycle. Worst case is one full `syncFrequency` window.
+1. **Pod is created**, referencing this ConfigMap via a volume mount.
+2. Kubelet's ConfigMap manager runs its per-pod registration step. If **no other pod already registered on this node** references this same ConfigMap, kubelet opens the watch connection **right now** — this is the answer to "who creates it, and when": kubelet's own ConfigMap manager, at pod registration, once per unique object per node (not once per pod — a second pod on the same node referencing the same ConfigMap reuses the existing watch).
+3. Kubelet performs the initial atomic symlink write (see **Appendix — Atomic Symlink Swap Mechanism**) and the pod starts with current content mounted.
+4. **ConfigMap is updated** (`kubectl edit`/`apply`) → API server persists to etcd → API server pushes a watch **event** down every open watch connection for this object, including the one from step 2.
+5. Kubelet's **local cache** for this ConfigMap updates from that event — this part is near-instant (milliseconds), since the connection was already open.
+6. The **mounted files are NOT rewritten at this instant.** The rewrite only happens the next time kubelet's own general, node-wide periodic sync loop reaches this pod and checks "does my local cache for this ConfigMap still match what's on disk." This loop is not created per ConfigMap or per pod — see **Appendix — General kubelet Sync Cycle** for what it actually is.
+7. On a mismatch, kubelet performs the atomic symlink swap. Files inside the pod now show new content — no pod restart needed.
+8. **If the pod is later deleted**, kubelet's ConfigMap manager unregisters it; if no other pod on that node still references this ConfigMap, the watch from step 2 is closed.
+
+> **In practice the total delay (step 4 → step 7) is commonly cited as 10–90 seconds**, worst case one full sync-loop window — see the Appendix for why this window isn't ConfigMap-specific.
+
+> **This entire flow — per-object watch dedup, general sync-loop-driven rewrite, atomic symlink swap — applies identically to Secret volumes.** it's the same kubelet mechanism, just watching Secret objects instead of ConfigMaps.
 
 ---
 
+
+
 ## Lab Step-by-Step Guide
+
+This walkthrough builds three ConfigMaps (Step 1) and consumes them
+through every method Concepts described: environment variables via
+`envFrom` and `env.valueFrom` (Steps 2–3b), volume-mounted files (Step
+4), and a `binaryData` TLS certificate (Step 5). Steps 6–7 then prove
+the two central claims from Concepts directly — that an immutable
+ConfigMap genuinely rejects updates, and that a volume-mounted value
+updates live while an env-var-sourced value never does, on the same
+cluster, side by side. Step 8 rebuilds ConfigMaps imperatively for exam
+practice; Step 9 tears everything down.
 
 ### Step 1 — Create ConfigMaps
 
@@ -543,7 +563,7 @@ VERSION=v2.4.1
 **Failure scenario — what happens when the ConfigMap is missing:**
 
 ```bash
-kubectl delete pod pod-valuefrom
+kubectl delete pod pod-valuefrom --grace-period=0 --force
 kubectl delete configmap release-config
 
 kubectl apply -f src/05-pod-env-valueFrom.yaml
@@ -593,7 +613,7 @@ pod-valuefrom   1/1     Running                      0          48s
 
 ### Step 3b — Consume ConfigMap via command arguments
 
-The third consumption method passes ConfigMap values as **command arguments**. The pattern: load the ConfigMap key as an env var first (via `env` or `envFrom`), then reference it inside `command` or `args` using `$(VAR_NAME)` syntax.
+The second consumption method passes ConfigMap values as **command arguments**. The pattern: load the ConfigMap key as an env var first (via `env` or `envFrom`), then reference it inside `command` or `args` using `$(VAR_NAME)` syntax.
 
 > **Is this really a separate consumption method?** Yes — the Kubernetes documentation lists it as distinct because the outcome is different: the value is delivered as part of the process's argv, not as an environment variable. The process reads it via `sys.argv` or `$1`/`$2` in shell scripts, not via `os.getenv()`. The env var step is always required first — there is no direct ConfigMap → args path.
 
@@ -630,7 +650,7 @@ Starting on port 8080 in production mode
 **Observation:** `APP_PORT=8080` and `APP_ENV=production` from `app-config` were substituted into the command string. The container received the already-substituted string.
 
 ```bash
-kubectl delete pod pod-cmd-args
+kubectl delete pod pod-cmd-args --force --grace-period=0
 ```
 
 **How `$(VAR_NAME)` substitution works — it is NOT shell substitution:**
@@ -653,7 +673,7 @@ By the time the shell runs, it receives the literal string `echo Starting on por
 
 ### Step 4 — Consume ConfigMap as volume-mounted files
 
-Volume mounting projects each ConfigMap key as a **file** in a directory. The key is the filename; the value is the file content. This is essential for config files that applications read from disk (nginx.conf, app.properties, etc.).
+In the third method, pod consumes ConfigMap as **volume mounted files**.Volume mounting projects each ConfigMap key as a **file** in a directory. The key is the filename; the value is the file content. This is essential for config files that applications read from disk (nginx.conf, app.properties, etc.).
 
 **06-pod-volume.yaml:**
 ```yaml
@@ -664,8 +684,15 @@ metadata:
   namespace: default
 spec:
   volumes:
-  # Volume-1: backed by app-files ConfigMap
-  - name: config-files       # volume name — referenced in volumeMounts below
+
+  # Volume-1: backed by release-config (immutable ConfigMap — mountable like any other)
+  - name: release-files      # volume name — referenced in volumeMounts below
+    configMap:
+      name: release-config   # immutable ConfigMap — also mountable as volume
+      # defaultMode: 0444    # optional: permission for all files in this volume (default 0644)
+
+  # Volume-2: backed by app-files ConfigMap
+  - name: config-files       
     configMap:
       name: app-files        # the ConfigMap to project
       # items: selectively project only some keys and control filenames
@@ -676,11 +703,7 @@ spec:
       - key: app.properties
         path: app.properties
         # mode: 0400           # optional: per-file permission (octal)
-  # Volume-2: backed by release-config (immutable ConfigMap — mountable like any other)
-  - name: release-files
-    configMap:
-      name: release-config   # immutable ConfigMap — also mountable as volume
-      # defaultMode: 0444    # optional: permission for all files in this volume (default 0644)
+
 
   containers:
   - name: app
@@ -827,26 +850,7 @@ kubectl exec pod-volume -- cat /etc/release/BUILD_DATE
 # 2026-04-01
 ```
 
-**How the symlink chain works and why it exists:**
-
-When kubelet projects a ConfigMap as a volume, it does NOT write file content directly to the target path. It builds a two-level symlink chain:
-
-```
-/etc/nginx/app.properties            ← Level 1: top-level symlink (what the app opens)
-        ↓ points to
-/etc/nginx/..data/app.properties     ← via the ..data directory symlink
-        ↓ ..data points to
-/etc/nginx/..2026_04_25_10_30_00.123456789/app.properties  ← actual file with content
-```
-
-**Why two levels?** A single file-to-file symlink swap is not atomic — there is a brief window where the target does not exist. The two-level approach enables a fully atomic update:
-
-1. kubelet writes **new content** into a brand-new timestamped directory (`..2026_04_25_10_45_00.987654321/`)
-2. kubelet issues a single `rename()` syscall to point `..data` at the new directory
-3. `rename()` is atomic at the filesystem level — readers always see either the complete old version or the complete new version, never a partial state
-4. The top-level symlinks (`app.properties`, `nginx`) never change — they always resolve through `..data/`
-
-> **Why `subPath` mounts do NOT get live updates:** `subPath` bind-mounts the actual file directly into the container — bypassing the `..data/` chain entirely. The atomic `rename()` on `..data/` never affects a bind-mounted file. Content is frozen at pod start time. Full `subPath` treatment (and why you'd choose it anyway) is `04-volume-mounts`' entire subject.
+>**Note:** : How the symlink chain works and why it exists? See **Appendix — Atomic Symlink Swap Mechanism** for the full mechanism in more depth, identical mechanism applies to Secret volume mounts.
 
 ---
 
@@ -1218,11 +1222,13 @@ In this lab, you:
 cd src/break-fix/
 ```
 
-### Error-1
+### Error-1 — "I tried to embed a large file in a ConfigMap, and it won't create at all"
 
-This scenario reproduces the 1 MiB ConfigMap size limit hitting in practice — a common real-world mistake when someone tries to embed a large file (a bundled dependency, a large dataset export) directly into a ConfigMap instead of using a PersistentVolume.
+**The scenario:** someone tries to embed a large file (a bundled
+dependency, a large dataset export) directly into a ConfigMap instead of
+using a PersistentVolume, and `kubectl create` rejects it outright.
+Investigate what limit was actually hit, before revealing the cause.
 
-**`src/break-fix/01-size-limit-exceeded.yaml`:**
 ```bash
 # Generate a file larger than 1 MiB
 head -c 1200000 /dev/urandom | base64 -w0 > /tmp/oversized.txt
@@ -1254,9 +1260,12 @@ rm -f /tmp/oversized.txt
 
 ---
 
-### Error-2
+### Error-2 — "Same key, two fields — and the apply was rejected"
 
-This scenario reproduces the key-overlap rule mentioned in Concepts — the same key name appearing in both `data` and `binaryData` on the same ConfigMap.
+**The scenario:** the same key name (`server.crt`) is accidentally
+written into both `data` and `binaryData` on the same ConfigMap. The
+YAML looks syntactically fine at a glance, but `kubectl apply` rejects
+it. Investigate what's actually conflicting, before revealing the cause.
 
 **`src/break-fix/02-duplicate-key-overlap.yaml`:**
 ```yaml
@@ -1503,137 +1512,137 @@ kubectl get configmap <name> -o jsonpath='{.immutable}'
 > One correct answer per question unless stated otherwise.
 > Target: 80% or above before moving to next Demo.
 
-**Q1. When is `binaryData` actually required instead of `data`?**
+**Q1. Concepts lists command arguments as a genuinely separate ConfigMap consumption method from environment variables, even though `$(VAR_NAME)` requires an env var to exist first. Why is it treated as distinct rather than just "a use of env vars"?**
 
-- A) Whenever a value is longer than a few lines
-- B) When the content is genuinely binary and would be corrupted by UTF-8 handling
-- C) Never — `data` can hold anything if base64-encoded
-- D) Only for TLS Secrets, never ConfigMaps
+- A) It isn't actually distinct — the docs just describe it that way for clarity
+- B) The value ends up delivered as part of the process's argv, read via `sys.argv`/`$1`, not via `os.getenv()` — a genuinely different delivery mechanism for the receiving application
+- C) It requires a completely different ConfigMap field
+- D) It only works with exec-form commands
 
 <details>
 <summary>Answer</summary>
 
-**B** — PEM certificates are base64-encoded *text* and belong in `data`; only genuinely binary content like DER certs needs `binaryData`.
-Trap: C confuses base64 encoding with a requirement — `data` is meant for readable text, and encoding text unnecessarily into `binaryData` doesn't reflect what the field is actually for.
+**B** — The env var step is always required first, but what the application actually receives (an argv entry vs. an environment lookup) is a real, distinct outcome.
+Trap: D is disproven directly in this demo's own Concepts — `$(VAR_NAME)` is shown working in both exec-form and shell-form.
 
 </details>
 
 ---
 
-**Q2. Two ConfigMap fields, `data` and `binaryData`, both contain a key named `server.crt`. What happens?**
+**Q2. `script.sh: |-` uses the block-scalar chomping indicator `|-` instead of plain `|`. What's the actual difference?**
 
-- A) `binaryData` silently wins
-- B) The API server rejects the ConfigMap as invalid
-- C) Both values are merged
-- D) `data` silently wins
+- A) `|-` preserves all trailing newlines; `|` strips them all
+- B) `|-` strips all trailing newlines; `|` strips only the final one
+- C) `|-` is Kubernetes-specific syntax; `|` is standard YAML
+- D) There is no difference — both are equivalent
 
 <details>
 <summary>Answer</summary>
 
-**B** — This is an explicit validation rule: a key can't exist in both fields at once, and the object is rejected outright.
-Trap: A and D both assume silent precedence resolution, which isn't how this specific rule works — it's a hard rejection, not first/last-wins.
+**B** — `|` (plain) keeps internal newlines but trims to a single trailing newline; `|-` removes trailing newlines entirely — useful specifically for shell scripts where a stray trailing blank line is unwanted.
+Trap: C reverses reality — both `|` and `|-` are standard YAML chomping indicators, neither is Kubernetes-specific.
 
 </details>
 
 ---
 
-**Q3. What does `immutable: true` eliminate at the control-plane level, beyond just blocking edits?**
+**Q3. A ConfigMap volume item sets `path: nginx/nginx.conf` under a `mountPath` of `/etc/nginx`. Where does the file actually end up?**
 
-- A) Nothing else — it's purely a permissions feature
-- B) The kubelet watch connection for that ConfigMap on every consuming node
-- C) The need for RBAC on that ConfigMap
-- D) The 1 MiB size limit
-
-<details>
-<summary>Answer</summary>
-
-**B** — This is the real scale-relevant benefit: no more persistent watch connection, reducing API server load measurably across thousands of pods/nodes.
-Trap: D confuses two unrelated ConfigMap rules — immutability and the size limit are independent constraints.
-
-</details>
-
----
-
-**Q4. Do `envFrom`-loaded ConfigMap values ever update in a running container without a restart?**
-
-- A) Yes, within the syncFrequency window
-- B) No — never, regardless of how long you wait
-- C) Only if `immutable: false` is explicitly set
-- D) Only for `stringData` values
-
-<details>
-<summary>Answer</summary>
-
-**B** — Env vars are baked into the process environment once at container start; there's no ongoing link to the ConfigMap object afterward.
-Trap: A describes volume-mount behavior, not env-var behavior — a very common mix-up between the two consumption methods.
-
-</details>
-
----
-
-**Q5. Why does kubelet use a two-level `..data` symlink chain instead of overwriting a file in place?**
-
-- A) It's a legacy implementation detail with no functional purpose
-- B) A direct overwrite isn't atomic — the two-level chain lets kubelet swap `..data` with a single atomic `rename()`
-- C) It's required by the busybox `ls` command
-- D) It only matters for `binaryData`
-
-<details>
-<summary>Answer</summary>
-
-**B** — This atomicity is the entire point: readers always see either the fully old or fully new file content, never a partial write.
-Trap: C confuses a diagnostic tool's display behavior (busybox `ls` not following symlinks) with the actual reason the mechanism exists.
-
-</details>
-
----
-
-**Q6. Can `envFrom` rename a ConfigMap key when loading it as an environment variable?**
-
-- A) Yes, using the `prefix` field
-- B) No — only `env.valueFrom.configMapKeyRef` supports renaming
-- C) Yes, using `items`
-- D) Yes, automatically, based on naming conventions
-
-<details>
-<summary>Answer</summary>
-
-**B** — `envFrom` always uses the ConfigMap's own key name as the env var name; `prefix` can prepend a string but doesn't rename the key itself.
-Trap: A is a near-miss — `prefix` is real but doesn't achieve a rename, just a namespaced prefix on the existing key name.
-
-</details>
-
----
-
-**Q7. `optional: true` is set and the referenced ConfigMap doesn't exist. What does `printenv` show for that variable?**
-
-- A) An empty string
-- B) Nothing at all — the variable is absent entirely
-- C) The literal text "null"
+- A) `/etc/nginx/nginx.conf`
+- B) `/etc/nginx/nginx/nginx.conf` — a real subdirectory named `nginx` gets created
+- C) `/nginx/nginx.conf`, ignoring `mountPath`
 - D) The pod fails to start
 
 <details>
 <summary>Answer</summary>
 
-**B** — Absent, not empty — `printenv` on a genuinely undeclared variable returns nothing and a non-zero exit code, which is exactly this case.
-Trap: A is the most common wrong assumption — "optional" sounds like it should default to blank, but Kubernetes simply omits the variable instead.
+**B** — Any `/` in `items[].path` creates a real subdirectory inside `mountPath` — this demo's own Lab hits this directly: `cat /etc/nginx/nginx.conf` fails with "No such file or directory" because the actual path requires the extra `nginx/` segment.
+Trap: A is the intuitive-but-wrong assumption that trips up exactly this scenario in the demo's own walkthrough.
 
 </details>
 
 ---
 
-**Q8. Does `$(VAR_NAME)` substitution in `command`/`args` see a variable that was loaded via `envFrom`?**
+**Q4. `envFrom` supports an optional `prefix` field. What does setting `prefix: "CFG_"` actually do?**
 
-- A) Yes, always
-- B) No — only variables explicitly declared in the same `env[]` list are in scope
-- C) Only in exec-form commands
-- D) Only if the variable name is uppercase
+- A) Filters which keys get loaded from the source
+- B) Prepends `CFG_` to every key name from that specific `envFrom` source before it becomes an env var
+- C) Sets a default value for any missing keys
+- D) Renames only the first key alphabetically
 
 <details>
 <summary>Answer</summary>
 
-**B** — This is the "envFrom blind spot" — `$(VAR_NAME)` substitution has no visibility into `envFrom`-sourced variables, only ones explicitly listed in `env[]`.
-Trap: A assumes full visibility into the container's entire environment, which isn't how this specific substitution mechanism works.
+**B** — `APP_ENV` becomes `CFG_APP_ENV`, `APP_PORT` becomes `CFG_APP_PORT`, etc. — useful specifically for avoiding key collisions when `envFrom` loads from multiple sources at once.
+Trap: A invents a filtering behavior `prefix` doesn't have — it changes every key's name, it doesn't select a subset of them.
+
+</details>
+
+---
+
+**Q5. A DER-format certificate must go in `binaryData`, but a PEM-format certificate of the same underlying certificate goes in `data`. Why the difference, given they represent the same certificate?**
+
+- A) DER is a newer, more secure format than PEM
+- B) PEM is base64-encoded text (`-----BEGIN CERTIFICATE-----`) and is therefore valid UTF-8; DER is the raw binary encoding of the same data and would be corrupted by UTF-8 handling
+- C) PEM certificates are always self-signed; DER certificates never are
+- D) DER is required for Kubernetes' own internal certificate handling
+
+<details>
+<summary>Answer</summary>
+
+**B** — It's the same certificate, two different encodings — one happens to already be text-safe, the other genuinely isn't.
+Trap: A and C both invent unrelated distinctions (security, signing) between two formats that differ only in encoding, not in what they cryptographically represent.
+
+</details>
+
+---
+
+**Q6. Break-Fix Error-1 tries to create a ConfigMap from a ~1.6MB base64-encoded file. What's the actual rejection, and when does it happen?**
+
+- A) The pod fails to start with `CreateContainerConfigError`
+- B) `kubectl create configmap` itself is rejected immediately with a "Too long" error — no ConfigMap is ever created
+- C) The ConfigMap is created but truncated to fit 1 MiB
+- D) It succeeds, but only the first 1 MiB is readable
+
+<details>
+<summary>Answer</summary>
+
+**B** — This fails at creation time, before any pod is even involved — there's no partial or truncated object, just an outright rejection.
+Trap: C and D both imagine a partial-success outcome that doesn't happen — the object is never created at all.
+
+</details>
+
+---
+
+**Q7. Break-Fix Error-2 puts the same key (`server.crt`) in both `data` and `binaryData` on one ConfigMap. Is the YAML itself syntactically invalid?**
+
+- A) Yes — this is a YAML parsing error
+- B) No — the YAML parses fine; the API server rejects it as a semantic validation error (duplicate key across the two fields)
+- C) Yes, because YAML doesn't allow the same key name to appear twice anywhere in a document
+- D) No — this is silently accepted, with `binaryData` taking precedence
+
+<details>
+<summary>Answer</summary>
+
+**B** — The YAML is completely well-formed; `data` and `binaryData` are two separate maps, so `server.crt` appearing as a key in each is legal YAML — Kubernetes' own API validation is what rejects it, not the YAML parser.
+Trap: C conflates "same key in the same map" (a real YAML restriction) with "same key across two different maps" (what's actually happening here) — these aren't the same rule.
+
+</details>
+
+---
+
+**Q8. A pod references a ConfigMap that doesn't exist yet (no `optional: true`). Once the ConfigMap is created, does the pod need to be deleted and reapplied to pick it up?**
+
+- A) Yes — a new pod must be created
+- B) No — the existing pod transitions from `CreateContainerConfigError` to `Running` automatically once the ConfigMap exists
+- C) Only if the ConfigMap is immutable
+- D) Only if the pod's `restartPolicy` is `Always`
+
+<details>
+<summary>Answer</summary>
+
+**B** — The kubelet keeps retrying container creation on its own; the same pod object recovers with no manual intervention the moment the missing dependency exists.
+Trap: D invents a `restartPolicy` dependency that doesn't apply here — this is the kubelet retrying container *creation*, not a container restart after it already ran.
 
 </details>
 
@@ -1645,3 +1654,158 @@ Score guide:
 | 6/8 | Re-read the relevant section, retry those questions |
 | Below 6/8 | Re-read the full demo and redo the walkthrough before proceeding |
 ````
+---
+
+## Appendix — General kubelet Sync Cycle
+
+This ConfigMap demo's own "Full update flow" refers to kubelet's periodic sync loop and `syncFrequency`. Worth being precise about what that loop actually is, since it's easy to assume it's a ConfigMap-specific mechanism — it isn't.
+
+**`syncFrequency` is not a per-ConfigMap or per-pod timer.** It's a single, node-wide periodic loop kubelet runs once, reconciling *all* pod state on that node each cycle — checking ConfigMap/Secret volume freshness is one of the things this general loop does, among others, not something instantiated separately for each pod or each ConfigMap. It is owned entirely by the **kubelet** — the container runtime has no role in ConfigMap/Secret content management at all.
+
+**This is a genuinely separate concern from `configMapAndSecretChangeDetectionStrategy` (`Get`/`Cache`/`Watch`).** That setting only controls *how kubelet finds out the current content* of a ConfigMap it already knows it needs (fetch live every time, use a TTL cache, or maintain a live watch-fed cache) — it has no bearing on *when* the mounted volume on disk actually gets rewritten. That timing is entirely the general sync loop's job. Confusing these two is a very common mistake in secondary sources online — worth not making it here.
+
+**Applies identically to Secrets.** Secret volumes go through the exact same general sync loop, the same `Get`/`Cache`/`Watch` strategy setting (it's one shared kubelet setting covering both object types), and the same per-object watch-dedup logic from Concepts above — nothing about this differs for Secrets versus ConfigMaps.
+
+---
+
+## Appendix — Atomic Symlink Swap Mechanism
+
+**How the symlink chain works and why it exists:**
+
+When kubelet projects a ConfigMap as a volume, it does NOT write file content directly to the target path. It builds a two-level symlink chain:
+
+```
+/etc/nginx/app.properties            ← Level 1: top-level symlink (what the app opens)
+        ↓ points to
+/etc/nginx/..data/app.properties     ← via the ..data directory symlink
+        ↓ ..data points to
+/etc/nginx/..2026_04_25_10_30_00.123456789/app.properties  ← actual file with content
+```
+
+**Why two levels?** A single file-to-file symlink swap is not atomic — there is a brief window where the target does not exist. The two-level approach enables a fully atomic update:
+
+When kubelet needs to write (or rewrite) a ConfigMap/Secret volume's content, it does **not** touch the individual visible files (`nginx.conf`, `app.properties`, etc.) directly. Instead:
+
+1. It writes the **complete new set of files** into a brand-new, uniquely timestamped directory on the node's filesystem (e.g. `..2026_04_26_10_45_00.987654321/`).
+2. It performs a **single atomic rename operation**, repointing the `..data` symlink from the old timestamped directory to the new one.
+3. Because a symlink-target rename is one indivisible filesystem operation, any process reading through `..data/<key>` at that exact moment sees either the **complete old version** or the **complete new version** of every file — never a mix of some old, some new, or a half-written file.
+4. The **top-level, per-key symlinks** (`app.properties -> ..data/app.properties`, `nginx -> ..data/nginx`) are set up once and essentially never need to change on a normal update — only the one `..data` symlink's target changes. This is exactly what Step 7's own verification shows: after editing `app-files`, the per-key symlinks are unchanged, only `..data`'s target timestamp is newer.
+5. The **old timestamped directory isn't deleted immediately** — kubelet cleans it up on a separate schedule, which is why Step 7's own output shows both the old and new timestamped directories briefly coexisting.
+
+**Why this matters, precisely:** if kubelet instead overwrote `app.properties` in place, byte by byte, a process reading that exact file during the write could see a genuinely corrupted, half-old-half-new result — a real risk for any config file being read at the same moment it's being rewritten. The two-level symlink design exists specifically to make that scenario impossible.
+
+**Applies identically to Secret volume mounts** — `02-secrets` relies on this exact same mechanism; nothing about the atomic-swap design changes for Secret content versus ConfigMap content.
+
+> **Why `subPath` mounts do NOT get live updates:** `subPath` bind-mounts the actual file directly into the container — bypassing the `..data/` chain entirely. The atomic `rename()` on `..data/` never affects a bind-mounted file. Content is frozen at pod start time. Full `subPath` treatment (and why you'd choose it anyway) is `04-volume-mounts`' entire subject.
+
+---
+
+## Appendix — YAML Literal Block Scalar Resulting Values
+
+The three chomping indicators, using **identical content** in all three cases —
+so the only variable is the indicator itself, making the difference in (a)
+"strip one final trailing newline," (b) "strip ALL trailing newlines," and (c)
+"keep ALL trailing newlines" directly comparable rather than merely described.
+
+**Source manifest — one ConfigMap, three keys, same two lines of content and
+the same two trailing blank lines under each:**
+
+```yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: chomping-demo
+data:
+  clip-example.txt: |
+    line one
+    line two
+
+
+  strip-example.txt: |-
+    line one
+    line two
+
+
+  keep-example.txt: |+
+    line one
+    line two
+
+
+  zzz-end-marker: "boundary — makes keep-example.txt's trailing blank lines unambiguous, not just EOF"
+```
+
+Each block has exactly the same two content lines (`line one`, `line two`)
+followed by exactly two blank lines before the next key — this is the part
+that actually exposes the difference between the three indicators. (The
+final `zzz-end-marker` key exists purely so `keep-example.txt`'s trailing
+blank lines are clearly bounded *within the document*, not just trailing
+off the end of the file, which some parsers can treat as a separate edge
+case.)
+
+**Resulting values — shown with explicit `\n` markers so nothing is left
+to infer:**
+
+**`clip-example.txt` (`|` — default, clip):**
+```
+line one\n
+line two\n
+```
+One trailing newline kept — the two blank lines in the source are discarded entirely.
+
+**`strip-example.txt` (`|-` — strip):**
+```
+line one\n
+line two
+```
+**Zero** trailing newlines — not even the one that would normally terminate
+the last content line. The value's very last character is the `o` in `two`.
+
+**`keep-example.txt` (`|+` — keep):**
+```
+line one\n
+line two\n
+\n
+\n
+```
+**All three** trailing newlines kept: the one that terminates `line two`
+itself, plus one for each of the two blank lines that followed it in the
+source.
+
+**How to verify this yourself, rather than take it on faith:**
+
+```bash
+kubectl apply -f chomping-demo.yaml
+kubectl exec <any-pod-with-this-mounted> -- cat -A /path/to/clip-example.txt
+kubectl exec <any-pod-with-this-mounted> -- cat -A /path/to/strip-example.txt
+kubectl exec <any-pod-with-this-mounted> -- cat -A /path/to/keep-example.txt
+```
+
+`cat -A` marks every line ending with a literal `$` — a blank line shows as
+a bare `$` on its own line. Run against the three files above, you'd see:
+
+```
+# clip-example.txt
+line one$
+line two$
+
+# strip-example.txt
+line one$
+line two          ← no trailing $ at all — "two" is the literal last byte
+
+# keep-example.txt
+line one$
+line two$
+$
+$
+```
+
+**Why this matters practically:** when this data is volume-mounted, the
+file on disk is byte-for-byte this exact value — an application reading
+`strip-example.txt` genuinely gets a file with no trailing newline at all,
+which some tools (a strict line-based parser expecting POSIX-style
+newline-terminated files) can actually choke on. This isn't cosmetic —
+getting the chomping indicator wrong produces a real, different file.
+
+This applies identically whether the data lives in a ConfigMap's `data`
+field or a Secret's `stringData` field — the YAML parsing behavior is
+unrelated to which object type is holding it.
