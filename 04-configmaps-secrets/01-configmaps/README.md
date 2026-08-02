@@ -55,6 +55,8 @@ By the end of this lab, you will be able to:
 ```
 04-configmaps-secrets/01-configmaps/
 ├── README.md
+├── 01-configmaps-anki.csv
+├── 01-configmaps-quiz.md
 └── src/
     ├── 01-configmap-literal.yaml        # Simple key-value ConfigMap
     ├── 02-configmap-file.yaml           # Multi-line / file-like ConfigMap
